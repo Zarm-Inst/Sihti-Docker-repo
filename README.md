@@ -20,7 +20,7 @@ Kirjoitettu pelkällä Pythonin standardikirjastolla: ei riippuvuuksia, ei tieto
 
 Valmis kontti on GitHubin konttirekisterissä Raspberry Pi:lle (64- ja 32-bittinen ARM) sekä tavallisille PC:ille.
 
-**Docker Compose:** repossa on valmis [`docker-compose.yml`](docker-compose.yml). Sen voi ajaa sellaisenaan tai kopioida `sihti:`-palvelun omaan compose-tiedostoon:
+**Docker Compose:** repossa on valmis [`docker-compose.yml`](docker-compose.yml). Sama tiedosto sopii jokaiselle Raspberry Pi:lle sellaisenaan, eikä siihen tarvitse kirjoittaa koneen osoitetta. Sen voi ajaa sellaisenaan tai kopioida `sihti:`-palvelun omaan compose-tiedostoon:
 
 ```yaml
 services:
@@ -34,9 +34,9 @@ services:
       - "4000:4000/tcp"
     volumes:
       - sihti-data:/data
+      - /etc/hostname:/etc/host-hostname:ro
     environment:
       TZ: Europe/Helsinki
-      SIHTI_TLS_EXTRA_NAMES: "192.168.1.10,raspberrypi.local"
     logging:
       driver: json-file
       options:
@@ -47,13 +47,32 @@ volumes:
   sihti-data:
 ```
 
-Vaihda `SIHTI_TLS_EXTRA_NAMES`-kohtaan koneen oma IP-osoite ja nimi, joilla avaat käyttöliittymän. Ne lisätään HTTPS-varmenteeseen. Kun arvo muuttuu, Sihti uusii varmenteen automaattisesti seuraavalla käynnistyksellä.
-
 ```bash
 docker compose up -d                                      # käynnistys
 docker compose pull sihti && docker compose up -d sihti   # päivitys uuteen versioon
 docker compose logs -f sihti                              # loki
 ```
+
+**Miten HTTPS-varmenne saa koneen nimen ja osoitteen ilman asetuksia:**
+
+- *Nimi:* `/etc/hostname`-liitos kertoo kontille koneen nimen, joten varmenne kattaa heti esim. `pi-olohuone.local`. Myös muut paikalliset nimet (`.local`, `.lan`, `.home`, `.internal`, `.koti` tai pisteetön nimi) lisätään automaattisesti jo ensimmäisellä yhteydellä.
+- *IP-osoite:* kontti ei näe koneen lähiverkko-osoitetta, joten Sihti oppii sen siitä, millä osoitteella käyttöliittymä avataan. Avaa uusi Pi ensimmäisellä kerralla osoitteella **`http://<pi:n IP>:4000`**: Sihti lisää osoitteen varmenteeseen ennen kuin ohjaa selaimen https:ään, eikä varoitusta tule. (Jos avaat suoraan `https://<IP>`, selain varoittaa yhden kerran; kun ohitat varoituksen, osoite lisätään ja seuraavalla kerralla yhteys on kunnossa.)
+- Opitut osoitteet säilyvät uudelleenkäynnistyksissä. Vain lähiverkon osoitteet ja paikalliset nimet hyväksytään (enintään 32), joten julkisia nimiä ei voi lisätä varmenteeseen. Toiminnon voi poistaa asetuksella `SIHTI_TLS_LEARN_NAMES: "false"` ja antaa nimet itse: `SIHTI_TLS_EXTRA_NAMES: "192.168.1.10,sihti.koti"`.
+
+### Useampi Raspberry Pi: yksi yhteinen varmentaja
+
+Oletuksena jokainen Pi luo oman varmentajansa, jolloin jokaisen Pi:n varmentaja pitäisi asentaa erikseen jokaiselle puhelimelle ja koneelle. Kun Pi:tä on useampi, tee kerran yhteinen varmentaja ja jaa se kaikille. Laitteille asennetaan silloin vain yksi varmentaja, ja se kelpaa kaikkiin Sihteihin.
+
+1. Luo varmentaja kerran (millä tahansa koneella, jossa on Docker):
+   ```bash
+   docker run --rm --user 0 -v "$PWD/sihti-ca:/out" ghcr.io/zarm-inst/sihti-docker-repo:latest python3 -m sihti --make-ca /out
+   ```
+   Komento tulostaa sormenjäljen. Hakemistoon syntyvät `ca.crt` ja `ca.key`, jotka kuuluvat valmiiksi kontin käyttäjälle (uid 10053).
+2. Kopioi `sihti-ca`-hakemisto jokaiselle Pi:lle compose-tiedoston viereen, esim. `scp -rp sihti-ca pi@pi-olohuone.local:~/sihti/`. Säilytä oikeudet (`-p`); tarvittaessa Pi:llä `sudo chown -R 10053:10053 sihti-ca`.
+3. Ota compose-tiedostossa käyttöön kommentoidut rivit `./sihti-ca:/ca:ro`, `SIHTI_TLS_CA_CERT` ja `SIHTI_TLS_CA_KEY`, ja käynnistä `docker compose up -d`.
+4. Asenna `sihti-ca/ca.crt` kerran puhelimille ja koneille (ohjeet käyttöliittymässä: *Asetukset → Suojattu yhteys*).
+
+`ca.key`:llä voi allekirjoittaa varmenteita, joihin laitteesi luottavat, joten säilytä se vain Pi:illä ja turvallisessa varmuuskopiossa.
 
 - Portit 53 (udp ja tcp) ja 4000 eivät saa olla koneella muun ohjelman käytössä (esim. systemd-resolved tai dnsmasq). Jos käyttöliittymän portti on varattu, vaihda vain vasen numero, esim. `"4100:4000/tcp"`.
 - Kaikki tiedot (asetukset, listat, loki, varmenteet) ovat volyymissa `sihti-data`. Kontin voi päivittää menettämättä mitään.
@@ -92,7 +111,7 @@ Sihti luo varmenteet itse:
 - **Paikallinen varmentaja** (voimassa 10 vuotta) luodaan ensimmäisellä käynnistyksellä. `install.sh` asentaa sen valmiiksi Pi:n omiin luotettuihin varmenteisiin.
 - **Palvelinvarmenne** (voimassa vuoden) on varmentajan allekirjoittama. Sihti uusii sen automaattisesti 30 päivää ennen vanhenemista, aina kun Pi:n nimi tai IP-osoite muuttuu sekä jos tiedosto vioittuu. Uusi varmenne otetaan käyttöön ilman uudelleenkäynnistystä.
 
-Varmenne kattaa nimet `localhost`, `<nimi>`, `<nimi>.local`, `<nimi>.lan`, `<nimi>.home` sekä Pi:n IP-osoitteet. Muita nimiä voi lisätä asetuksella `tls_extra_names`.
+Varmenne kattaa nimet `localhost`, `<nimi>`, `<nimi>.local`, `<nimi>.lan`, `<nimi>.home` sekä Pi:n IP-osoitteet. Lisäksi varmenteeseen lisätään automaattisesti lähiverkko-osoite tai paikallinen nimi, jolla käyttöliittymä avataan. Muita nimiä voi lisätä asetuksella `tls_extra_names`.
 
 **Muut laitteet:** asenna varmentaja kerran jokaiselle laitteelle, jolla käytät käyttöliittymää: *Asetukset → Suojattu yhteys → Lataa varmentaja*. Samassa kohdassa on ohjeet Windowsille, macOS:lle, iPhonelle, Androidille, Linuxille ja Firefoxille. Tarkista, että varmentajan sormenjälki vastaa sivulla (ja `install.sh`:n lopussa) näkyvää. Ilman asennusta sivu toimii, mutta selain varoittaa.
 
@@ -117,6 +136,8 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 | `update_interval_hours` | `24` | Listojen päivitysväli |
 | `https` | `true` | HTTPS käyttöliittymään (`false` = pelkkä HTTP) |
 | `tls_extra_names` | `[]` | Lisänimet ja -osoitteet varmenteeseen |
+| `tls_learn_names` | `true` | Lisää käyttöliittymän avaamiseen käytetty lähiverkko-osoite tai paikallinen nimi varmenteeseen |
+| `tls_ca_cert`, `tls_ca_key` | tyhjä | Yhteinen varmentaja usealle laitteelle; tyhjä = laite luo oman |
 | `tls_cert`, `tls_key` | tyhjä | Oma varmenne; tyhjä = luodaan automaattisesti |
 
 ## Komentorivi

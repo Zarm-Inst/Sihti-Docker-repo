@@ -21,6 +21,8 @@ def main():
     ap.add_argument("--update-lists", action="store_true", help="päivitä estolistat ja lopeta")
     ap.add_argument("--renew-cert", action="store_true", help="luo uusi HTTPS-varmenne ja lopeta")
     ap.add_argument("--ca-path", action="store_true", help="tulosta paikallisen varmentajan polku ja lopeta")
+    ap.add_argument("--make-ca", metavar="HAKEMISTO",
+                    help="luo yhteinen varmentaja usealle laitteelle hakemistoon ja lopeta")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -32,6 +34,13 @@ def main():
         pw = getpass.getpass("Uusi salasana (tyhjä = ei salasanaa): ")
         config.update(password_hash=hash_password(pw) if pw else "")
         print("Tallennettu.")
+        return
+
+    if args.make_ca:
+        from .tls import make_ca
+        crt, key, fp = make_ca(args.make_ca)
+        print(f"Yhteinen varmentaja luotu:\n  {crt}\n  {key}\nSormenjälki: {fp}")
+        print("Kopioi hakemisto jokaiselle laitteelle. Pidä ca.key tallessa: sillä voi allekirjoittaa varmenteita.")
         return
 
     if args.renew_cert or args.ca_path:

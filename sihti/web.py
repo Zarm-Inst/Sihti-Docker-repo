@@ -229,6 +229,9 @@ def make_handler(app):
                 self._send(200, fh.read(), ctype)
 
         def _dispatch(self, method):
+            if app.certs and isinstance(self.connection, ssl.SSLSocket):
+                # Opitaan osoite, jolla käyttöliittymä avattiin (esim. Pi:n IP Dockerissa)
+                app.certs.learn(self.headers.get("Host", ""))
             url = urlparse(self.path)
             path = url.path
             if path == "/sihti-varmentaja.crt" and method == "GET":
@@ -302,6 +305,7 @@ class WebServer(ThreadingHTTPServer):
     tavusta (0x16), tavallinen HTTP-pyyntö ohjataan https-osoitteeseen."""
     daemon_threads = True
     tls_context = None
+    certs = None
 
     def finish_request(self, request, client_address):
         if self.tls_context is None:
@@ -341,6 +345,9 @@ class WebServer(ThreadingHTTPServer):
             host = next((l.split(":", 1)[1].strip() for l in lines[1:] if l.lower().startswith("host:")), "")
             if not host or any(c in host for c in "\r\n /\\@"):
                 host = f"{self.server_address[0]}:{self.server_address[1]}"
+            if self.certs:
+                # Varmenne valmiiksi tälle osoitteelle ennen kuin selain siirtyy https:ään
+                self.certs.learn(host)
             location = f"https://{host}{path}"
             body = f'<a href="{location}">Siirry suojattuun osoitteeseen</a>'.encode()
             sock.sendall(
@@ -356,6 +363,7 @@ def start_web(app, host, port, tls_context=None):
     WebServer.address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
     srv = WebServer((host, port), make_handler(app))
     srv.tls_context = tls_context
+    srv.certs = app.certs if tls_context else None
     threading.Thread(target=srv.serve_forever, daemon=True, name="web").start()
     log.info("käyttöliittymä: %s://%s:%d/", "https" if tls_context else "http", host, port)
     return srv

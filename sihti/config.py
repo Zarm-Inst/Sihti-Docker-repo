@@ -24,6 +24,9 @@ DEFAULTS = {
     "tls_extra_names": [],         # lisänimet/IP:t varmenteeseen, esim. ["sihti.koti", "10.0.0.5"]
     "tls_cert": "",                # oma varmenne (PEM, ketju); tyhjä = luodaan automaattisesti
     "tls_key": "",                 # oman varmenteen avain
+    "tls_learn_names": True,       # lisää käyttöliittymän avaamiseen käytetty lähiverkko-osoite varmenteeseen
+    "tls_ca_cert": "",             # yhteinen varmentaja usealle laitteelle (tyhjä = oma varmentaja)
+    "tls_ca_key": "",
     "data_dir": "/var/lib/sihti",
 }
 

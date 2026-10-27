@@ -313,7 +313,9 @@ async function loadTls() {
   const days = Math.floor((t.not_after * 1000 - Date.now()) / 86400000);
   state.textContent = t.custom
     ? "Käytössä on oma varmenteesi. Sihti lataa sen uudelleen automaattisesti, kun tiedosto vaihtuu."
-    : `Sihti uusii varmenteen itse 30 päivää ennen sen vanhenemista ja aina, kun laitteen nimi tai osoite muuttuu.`;
+    : "Sihti uusii varmenteen itse 30 päivää ennen sen vanhenemista ja aina, kun laitteen nimi tai osoite muuttuu. "
+      + "Kun avaat sivun uudella lähiverkko-osoitteella, osoite lisätään varmenteeseen automaattisesti."
+      + (t.shared_ca ? " Käytössä on yhteinen varmentaja, joten sama asennus kelpaa kaikkiin Sihti-laitteisiin." : "");
   const rows = [
     ["Voimassa", `${new Date(t.not_after * 1000).toLocaleDateString("fi-FI")} asti (${days} pv)`],
     ["Osoitteet", [...t.names, ...t.ips].join(", ") || "–"],

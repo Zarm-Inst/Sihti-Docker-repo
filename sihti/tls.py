@@ -8,6 +8,7 @@ Varmenteet luodaan openssl-komentorivityökalulla, joka kuuluu Raspberry Pi OS:�
 """
 import ipaddress
 import json
+import re
 import logging
 import os
 import shutil
@@ -23,6 +24,9 @@ log = logging.getLogger("sihti.tls")
 CA_DAYS = 3650
 CERT_DAYS = 365
 RENEW_BEFORE_DAYS = 30
+LEARN_MAX = 32              # opittujen nimien/osoitteiden enimmäismäärä
+LOCAL_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain", ".koti")
+HOST_HOSTNAME_FILE = "/etc/host-hostname"   # Dockerissa: isäntäkoneen /etc/hostname (vain luku)
 CHECK_INTERVAL = 6 * 3600   # voimassaolon tarkistus
 FILE_POLL = 60              # varmennetiedoston muutoksen tarkistus
 
@@ -41,11 +45,61 @@ def _openssl(*args, input_text=None):
     return r.stdout
 
 
+_LABEL = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+_NAME_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})*$")
+
+
+def host_from_header(value):
+    """'192.168.1.10:4000' / '[fd00::1]:4000' / 'pi.local' -> pelkkä nimi tai osoite."""
+    v = (value or "").strip().lower()
+    if v.startswith("["):
+        return v[1:].split("]", 1)[0]
+    if v.count(":") == 1:
+        v = v.split(":", 1)[0]
+    return v.rstrip(".")
+
+
+def learnable(value):
+    """Palauttaa siistityn arvon, jos sen saa lisätä varmenteeseen automaattisesti.
+    Vain lähiverkon osoitteet ja paikalliset nimet: julkisia nimiä ei opita."""
+    v = host_from_header(value)
+    if not v:
+        return None
+    try:
+        a = ipaddress.ip_address(v)
+    except ValueError:
+        pass
+    else:
+        if a.is_private and not (a.is_loopback or a.is_unspecified or a.is_link_local or a.is_multicast):
+            return str(a)
+        return None
+    if len(v) > 253 or not _NAME_RE.match(v):
+        return None
+    if "." not in v or v.endswith(LOCAL_SUFFIXES):
+        return v
+    return None
+
+
+def _host_names():
+    """Koneen nimi. Dockerissa luetaan isäntäkoneen nimi, jos se on liitetty konttiin."""
+    hosts = set()
+    try:
+        with open(HOST_HOSTNAME_FILE, encoding="utf-8") as f:
+            h = f.read().strip().split(".")[0].lower()
+        if h:
+            hosts.add(h)
+    except OSError:
+        pass
+    h = socket.gethostname().split(".")[0].lower()
+    if h:
+        hosts.add(h)
+    return hosts
+
+
 def local_names(extra=()):
     """Nimet ja osoitteet, joilla käyttöliittymään todennäköisesti otetaan yhteyttä."""
     names = {"localhost"}
-    host = socket.gethostname().split(".")[0].lower()
-    if host:
+    for host in _host_names():
         names |= {host, f"{host}.local", f"{host}.lan", f"{host}.home"}
     fqdn = socket.getfqdn().lower()
     if "." in fqdn and not fqdn.endswith(".arpa"):
@@ -88,8 +142,14 @@ class CertManager:
         self.config = config
         self.dir = os.path.join(config["data_dir"], "tls")
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
-        self.ca_key = os.path.join(self.dir, "ca.key")
-        self.ca_crt = os.path.join(self.dir, "ca.crt")
+        # Yhteinen varmentaja usealle laitteelle: tls_ca_cert + tls_ca_key (esim. kontissa
+        # vain luku -liitos). Muuten varmentaja luodaan tälle laitteelle.
+        shared_crt, shared_key = config.get("tls_ca_cert"), config.get("tls_ca_key")
+        self.shared_ca = bool(shared_crt and shared_key)
+        self.ca_key = shared_key or os.path.join(self.dir, "ca.key")
+        self.ca_crt = shared_crt or os.path.join(self.dir, "ca.crt")
+        self.learned_path = os.path.join(self.dir, "opitut.json")
+        self._learn_lock = threading.Lock()
         custom_cert, custom_key = config.get("tls_cert"), config.get("tls_key")
         self.custom = bool(custom_cert and custom_key)
         self.cert = custom_cert or os.path.join(self.dir, "server.crt")
@@ -117,12 +177,25 @@ class CertManager:
         out = _openssl("x509", "-in", path, "-noout", "-enddate").strip().split("=", 1)[-1]
         return ssl.cert_time_to_seconds(out)
 
+    def learned(self):
+        try:
+            with open(self.learned_path, encoding="utf-8") as f:
+                return [x for x in json.load(f) if isinstance(x, str)]
+        except (OSError, ValueError):
+            return []
+
+    def _wanted(self):
+        extra = list(self.config.get("tls_extra_names", [])) + self.learned()
+        return local_names(extra)
+
     def info(self):
         if not os.path.exists(self.cert):
             return {"enabled": False}
         d = {
             "enabled": True,
             "custom": self.custom,
+            "shared_ca": self.shared_ca,
+            "learned": self.learned(),
             "not_after": self._not_after(self.cert),
             "fingerprint": self._fingerprint(self.cert),
             "names": self._meta().get("names", []),
@@ -135,6 +208,15 @@ class CertManager:
 
     # ---------- luonti ----------
     def _ensure_ca(self):
+        if self.shared_ca:
+            if not (os.path.exists(self.ca_crt) and os.path.exists(self.ca_key)):
+                raise TLSError(f"yhteistä varmentajaa ei löydy: {self.ca_crt}, {self.ca_key}")
+            if not os.access(self.ca_key, os.R_OK):
+                raise TLSError(f"yhteisen varmentajan avainta ei voi lukea: {self.ca_key} "
+                               "(kontissa: sudo chown 10053 <avain>)")
+            if self._not_after(self.ca_crt) - time.time() < (CERT_DAYS + 30) * 86400:
+                log.warning("yhteinen varmentaja vanhenee pian – luo uusi ja jaa se laitteille")
+            return False
         if os.path.exists(self.ca_crt) and os.path.exists(self.ca_key):
             # Uusi varmentaja vasta, kun vanha on vanhenemassa (silloin laitteille asennetaan uusi)
             if self._not_after(self.ca_crt) - time.time() > (CERT_DAYS + 30) * 86400:
@@ -202,7 +284,7 @@ class CertManager:
             return False
         with self._lock:
             ca_new = self._ensure_ca()
-            names, ips = local_names(self.config.get("tls_extra_names", []))
+            names, ips = self._wanted()
             reason = "pyydetty" if force else ("varmentaja vaihtui" if ca_new else self.renewal_reason(names, ips))
             if not reason:
                 return False
@@ -210,12 +292,61 @@ class CertManager:
             self._issue(names, ips)
             return True
 
-    # ---------- SSL-konteksti ----------
-    def build_context(self):
-        self.ensure()
+    # ---------- automaattinen oppiminen ----------
+    def covers(self, value):
+        m = self._meta()
+        return value in m.get("names", []) or value in m.get("ips", [])
+
+    def learn(self, value):
+        """Lisää osoitteen tai nimen, jolla selain otti yhteyttä, varmenteeseen.
+        Palauttaa True, jos varmenne uusittiin. Kontissa ilman isäntäverkkoa tämä on
+        ainoa tapa saada koneen lähiverkko-osoite varmenteeseen ilman asetuksia."""
+        if self.custom or not self.config.get("tls_learn_names", True):
+            return False
+        v = learnable(value)
+        if not v or self.covers(v):
+            return False
+        with self._learn_lock:
+            if self.covers(v):
+                return False
+            learned = self.learned()
+            if v in learned:
+                return False
+            if len(learned) >= LEARN_MAX:
+                log.warning("opittujen nimien enimmäismäärä täynnä, ohitetaan %s", v)
+                return False
+            learned.append(v)
+            tmp = self.learned_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(learned, f, indent=2)
+            os.replace(tmp, self.learned_path)
+            log.info("uusi osoite käyttöliittymälle: %s – lisätään varmenteeseen", v)
+            try:
+                changed = self.ensure()
+                if changed:
+                    self.reload()
+                return changed
+            except (TLSError, OSError, ssl.SSLError) as e:
+                log.error("varmenteen uusiminen epäonnistui: %s", e)
+                return False
+
+    def _new_context(self):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(self.cert, self.key)
+        return ctx
+
+    def _sni(self, sslsock, server_name, _ctx):
+        # Nimellä (esim. pi-olohuone.local) avattaessa selain kertoo nimen jo ennen
+        # varmenteen valintaa: uusi varmenne ehditään antaa tälle samalle yhteydelle.
+        if server_name and self.learn(server_name):
+            sslsock.context = self._new_context()
+
+    # ---------- SSL-konteksti ----------
+    def build_context(self):
+        self.ensure()
+        ctx = self._new_context()
+        ctx.sni_callback = self._sni
         self._loaded_mtime = os.path.getmtime(self.cert)
         self.context = ctx
         return ctx
@@ -244,6 +375,27 @@ class CertManager:
                     self.reload()
             except (TLSError, OSError, ssl.SSLError) as e:
                 log.error("varmenteen uusiminen epäonnistui: %s", e)
+
+
+def make_ca(out_dir, owner_uid=10053):
+    """Luo yhteisen varmentajan usealle laitteelle (python -m sihti --make-ca HAKEMISTO)."""
+    os.makedirs(out_dir, exist_ok=True)
+    crt, key = os.path.join(out_dir, "ca.crt"), os.path.join(out_dir, "ca.key")
+    if os.path.exists(crt) or os.path.exists(key):
+        raise TLSError(f"{out_dir} sisältää jo varmentajan – ei korvata")
+    _openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key)
+    os.chmod(key, 0o600)
+    _openssl("req", "-x509", "-new", "-key", key, "-sha256", "-days", str(CA_DAYS),
+             "-subj", "/O=Sihti/CN=Sihti yhteinen varmentaja",
+             "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+             "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+             "-addext", "subjectKeyIdentifier=hash",
+             "-out", crt)
+    os.chmod(crt, 0o644)
+    if os.geteuid() == 0 and owner_uid is not None:
+        for p in (out_dir, crt, key):
+            os.chown(p, owner_uid, owner_uid)
+    return crt, key, _openssl("x509", "-in", crt, "-noout", "-fingerprint", "-sha256").strip().split("=", 1)[-1]
 
 
 def openssl_available():

@@ -154,6 +154,17 @@ class TestDnsWire(unittest.TestCase):
                 w.parse_query(junk)
 
 
+class TestLearnable(unittest.TestCase):
+    def test_rules(self):
+        from sihti.tls import learnable
+        ok = {"192.168.1.10:4000": "192.168.1.10", "10.0.0.5": "10.0.0.5", "[fd00::5]:4000": "fd00::5",
+              "Pi-Toimisto.local:4000": "pi-toimisto.local", "raspberrypi": "raspberrypi", "sihti.lan": "sihti.lan"}
+        for raw, want in ok.items():
+            self.assertEqual(learnable(raw), want, raw)
+        for raw in ("8.8.8.8", "127.0.0.1", "0.0.0.0", "example.com", "pankki.fi:4000", "a b", "", "x" * 300 + ".local"):
+            self.assertIsNone(learnable(raw), raw)
+
+
 # ------------------------------------------------------------- integraatiotesti
 
 class TestService(unittest.TestCase):
@@ -197,6 +208,7 @@ class TestService(unittest.TestCase):
         cls.stop.set()
         for s in cls.servers:
             s.shutdown()
+            s.server_close()
         cls.up.sock.close()
         shutil.rmtree(cls.dir, ignore_errors=True)
 
@@ -258,6 +270,81 @@ class TestService(unittest.TestCase):
         new = self.api("/api/tls/renew", "POST")["fingerprint"]
         self.assertNotEqual(old, new)
         self.assertTrue(self.api("/api/session") is not None)  # uusi varmenne kelpaa samalle varmentajalle
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl puuttuu")
+class TestLearnAddress(unittest.TestCase):
+    """Kontti ilman isäntäverkkoa: varmenteeseen tulee osoite, jolla käyttöliittymä avataan."""
+    def setUp(self):
+        from sihti.tls import CertManager
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.port = free_port()
+        cfg_path = os.path.join(self.dir, "c.json")
+        with open(cfg_path, "w") as f:
+            json.dump({"data_dir": self.dir, "lists": []}, f)
+        self.cfg = Config(cfg_path)
+        filt = Filter(self.cfg)
+        qlog = QueryLog(self.cfg)
+        self.certs = CertManager(self.cfg)
+        ctx = self.certs.build_context()
+        self.srv = start_web(App(self.cfg, filt, qlog, Resolver(self.cfg, filt, qlog), self.certs), "127.0.0.1", self.port, ctx)
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+
+    def names(self):
+        info = self.certs.info()
+        return set(info["names"]) | set(info["ips"])
+
+    def test_http_host_learned_before_redirect(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as c:
+            c.sendall(b"GET / HTTP/1.1\r\nHost: 192.168.77.10:4000\r\n\r\n")
+            head = c.recv(1024).decode()
+        self.assertIn("Location: https://192.168.77.10:4000/", head)
+        self.assertIn("192.168.77.10", self.names())
+
+    def test_sni_name_trusted_on_first_connection(self):
+        ctx = ssl.create_default_context(cafile=self.certs.ca_crt)
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as raw:
+            with ctx.wrap_socket(raw, server_hostname="pi-olohuone.local") as tls:  # varmennetaan nimi
+                tls.sendall(b"GET /api/session HTTP/1.1\r\nHost: pi-olohuone.local:4000\r\nConnection: close\r\n\r\n")
+                self.assertIn(b"200", tls.recv(64))
+        self.assertIn("pi-olohuone.local", self.names())
+        self.assertEqual(self.certs.learned(), ["pi-olohuone.local"])
+
+    def test_public_name_not_learned(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as c:
+            c.sendall(b"GET / HTTP/1.1\r\nHost: pankki.example.com\r\n\r\n")
+            c.recv(1024)
+        self.assertNotIn("pankki.example.com", self.names())
+        self.assertEqual(self.certs.learned(), [])
+
+    def test_learned_survive_restart(self):
+        self.certs.learn("10.1.2.3")
+        from sihti.tls import CertManager
+        again = CertManager(self.cfg)
+        self.assertFalse(again.ensure(), "uudelleenkäynnistys ei saa uusia varmennetta turhaan")
+        self.assertIn("10.1.2.3", set(again.info()["ips"]))
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl puuttuu")
+class TestSharedCA(unittest.TestCase):
+    def test_two_devices_one_ca(self):
+        from sihti.tls import CertManager, make_ca
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        crt, key, _fp = make_ca(os.path.join(base, "ca"))
+        fps = set()
+        for dev in ("pi1", "pi2"):
+            path = os.path.join(base, dev + ".json")
+            with open(path, "w") as f:
+                json.dump({"data_dir": os.path.join(base, dev), "tls_ca_cert": crt, "tls_ca_key": key}, f)
+            m = CertManager(Config(path))
+            m.ensure()
+            self.assertEqual(m.info()["ca_fingerprint"], CertManager._fingerprint(crt))
+            fps.add(m.info()["fingerprint"])
+            self.assertFalse(os.path.exists(os.path.join(base, dev, "tls", "ca.key")), "oma varmentaja ei saa syntyä")
+        self.assertEqual(len(fps), 2, "laitteilla omat palvelinvarmenteet, yhteinen varmentaja")
 
 
 if __name__ == "__main__":
