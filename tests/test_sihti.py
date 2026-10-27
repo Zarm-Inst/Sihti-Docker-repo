@@ -113,6 +113,38 @@ class TestParseList(unittest.TestCase):
         self.assertEqual(parse_list(text), {"ads.example.com", "tracker.example.net", "banner.example.org"})
 
 
+class TestDomainSet(unittest.TestCase):
+    def test_build_and_lookup(self):
+        from sihti.filtering import DomainSet, build_domain_set, _build_isolated
+        from array import array
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        names = [f"n{i}.esimerkki{i % 97}.fi" for i in range(20000)]
+        p1, p2 = os.path.join(d, "a.txt"), os.path.join(d, "b.txt")
+        with open(p1, "w") as f:
+            f.write("# lista\n" + "".join(f"0.0.0.0 {n}\n" for n in names[:12000]))
+        with open(p2, "w") as f:   # osin päällekkäinen, eri muoto
+            f.write("".join(f"||{n}^\n" for n in names[10000:]))
+        key = os.urandom(16)
+        for builder in (build_domain_set, _build_isolated):   # sama tulos omassa prosessissa
+            data_b, index_b, count, per_file = builder([p1, p2], key)
+            data, index = array("Q"), array("Q")
+            data.frombytes(data_b)
+            index.frombytes(index_b)
+            ds = DomainSet(key, data, index, count)
+            self.assertEqual((count, per_file), (20000, [12000, 10000]))
+            self.assertTrue(all(n in ds for n in names))
+            self.assertFalse(any(f"x{i}.esimerkki.fi" in ds for i in range(20000)))
+        self.assertNotIn("a.fi", DomainSet())
+
+    def test_fast_validation_matches_regex_on_real_names(self):
+        from sihti.filtering import _DOMAIN_RE, _valid_list_domain
+        for n in ("ads.example.com", "a-b.c_d.example.co.uk", "xn--4ca0b.fi", "1.2.3.example.net"):
+            self.assertTrue(_valid_list_domain(n) and _DOMAIN_RE.match(n), n)
+        for n in ("-a.com", "a-.com", "a..com", ".a.com", "a.c", "a" * 64 + ".com", "a.co-", "a b.com", "a.c_m"):
+            self.assertFalse(_valid_list_domain(n), n)
+
+
 class TestEnv(unittest.TestCase):
     def test_types(self):
         got = env_overrides({"SIHTI_WEB_PORT": "4400", "SIHTI_HTTPS": "false",

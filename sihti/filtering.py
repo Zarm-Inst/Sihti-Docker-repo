@@ -1,6 +1,9 @@
 """Estolistojen lataus, jäsennys ja verkkotunnusten tarkistus."""
 import hashlib
 import json
+import shutil
+from array import array
+from bisect import bisect_left
 import logging
 import os
 import re
@@ -11,15 +14,34 @@ import urllib.request
 log = logging.getLogger("sihti.suodatin")
 
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9-]{2,63}$")
+_CHARS_RE = re.compile(r"[a-z0-9._-]+")
+
+
+def _valid_list_domain(c):
+    """Nopea tarkistus listojen riveille (miljoonia rivejä): sama tulos kuin _DOMAIN_RE
+    tavallisille nimille, mutta ilman raskasta säännöllistä lauseketta."""
+    if len(c) > 253 or not _CHARS_RE.fullmatch(c) or "." not in c or ".." in c:
+        return False
+    if c[0] in ".-" or c[-1] in ".-" or ".-" in c or "-." in c:
+        return False
+    tld = c.rsplit(".", 1)[1]
+    if len(tld) < 2 or "_" in tld:
+        return False
+    if len(c) > 63 and any(len(label) > 63 for label in c.split(".")):
+        return False
+    return True
+
+
 _SKIP = {"localhost", "localhost.localdomain", "local", "broadcasthost", "ip6-localhost",
          "ip6-loopback", "0.0.0.0", "ip6-localnet", "ip6-mcastprefix", "ip6-allnodes",
          "ip6-allrouters", "ip6-allhosts"}
 
 
-def parse_list(text):
-    """Tukee hosts-muotoa, pelkkiä verkkotunnuksia ja ||domain^ -muotoa."""
-    out = set()
-    for raw in text.splitlines():
+def iter_domains(lines):
+    """Käy listan rivit läpi yksi kerrallaan (ei koko tiedostoa muistiin).
+    Tukee hosts-muotoa, pelkkiä verkkotunnuksia ja ||domain^ -muotoa."""
+    valid = _valid_list_domain
+    for raw in lines:
         line = raw.split("#", 1)[0].strip().lower()
         if not line or line.startswith("!") or line.startswith("["):
             continue
@@ -32,10 +54,83 @@ def parse_list(text):
             parts = line.split()
             candidate = parts[1] if len(parts) >= 2 else parts[0]
         candidate = candidate.rstrip(".")
-        if candidate in _SKIP or not _DOMAIN_RE.match(candidate):
+        if candidate in _SKIP or not valid(candidate):
             continue
-        out.add(candidate)
-    return out
+        yield candidate
+
+
+def parse_list(text):
+    return set(iter_domains(text.splitlines()))
+
+
+class DomainSet:
+    """Tiivis joukko estettäviä nimiä: jokaisesta nimestä tallennetaan vain 64-bittinen
+    avaimellinen tiiviste (8 tavua) yhteen lajiteltuun taulukkoon, jonka hakemisto jakaa
+    sen 65 536 lohkoon. Viisi miljoonaa nimeä vie noin 45 Mt, kun tavallisena Python-
+    joukkona ne veisivät lähes gigatavun. Väärän osuman todennäköisyys on käytännössä nolla."""
+    SHIFT = 48
+
+    def __init__(self, key=b"", data=None, index=None, count=0):
+        self.key = key
+        self._data = data
+        self._index = index
+        self._count = count
+
+    def __contains__(self, name):
+        if not self._count:
+            return False
+        h = fingerprint(name, self.key)
+        b = h >> self.SHIFT
+        lo, hi = self._index[b], self._index[b + 1]
+        i = bisect_left(self._data, h, lo, hi)
+        return i < hi and self._data[i] == h
+
+    def __len__(self):
+        return self._count
+
+    def __bool__(self):
+        return self._count > 0
+
+
+def fingerprint(name, key):
+    return int.from_bytes(hashlib.blake2b(name.encode(), digest_size=8, key=key).digest(), "big")
+
+
+def build_domain_set(paths, key):
+    """Lukee listatiedostot ja rakentaa DomainSetin raakadatan. Ajetaan omassa prosessissaan,
+    jotta raskas jäsennys ei hidasta DNS-vastauksia (Pythonin GIL). Palauttaa
+    (data_bytes, index_bytes, nimiä_yhteensä, [rivejä_per_tiedosto])."""
+    buckets = [array("Q") for _ in range(1 << (64 - DomainSet.SHIFT))]
+    shift = DomainSet.SHIFT
+    per_file = []
+    for path in paths:
+        n = 0
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for name in iter_domains(f):
+                h = fingerprint(name, key)
+                buckets[h >> shift].append(h)
+                n += 1
+        per_file.append(n)
+    data = array("Q")
+    index = array("Q", [0])
+    for i, a in enumerate(buckets):
+        if a:
+            data.extend(sorted(set(a)))   # päällekkäiset pois, lajittelu hakua varten
+            buckets[i] = None
+        index.append(len(data))
+    return data.tobytes(), index.tobytes(), len(data), per_file
+
+
+def _build_isolated(paths, key):
+    """Rakentaa erillisessä prosessissa; jos se ei onnistu, tässä prosessissa."""
+    try:
+        import multiprocessing
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(1) as pool:
+            return pool.apply(build_domain_set, (paths, key))
+    except Exception as e:  # noqa: BLE001
+        log.warning("erillistä prosessia ei voitu käyttää (%s), rakennetaan pääprosessissa", e)
+        return build_domain_set(paths, key)
 
 
 def normalize_domain(raw):
@@ -77,7 +172,9 @@ class Filter:
         self.custom_path = os.path.join(self.data_dir, "custom.json")
         os.makedirs(self.lists_dir, exist_ok=True)
         self._lock = threading.RLock()
-        self.blocked = frozenset()
+        self._rebuild_lock = threading.Lock()
+        self.rebuilding = False
+        self.blocked = DomainSet()
         self.allow = set()        # sallitaan + kaikki aliverkkotunnukset
         self.deny = set()         # estetään + kaikki aliverkkotunnukset
         self.deny_regex = []      # [(pattern_str, compiled)]
@@ -85,7 +182,7 @@ class Filter:
         self.last_update = None
         self.pause_until = None
         self._load_custom()
-        self.rebuild()
+        # Listat ladataan taustalla (updater_loop), jotta DNS vastaa heti käynnistyksessä
 
     # ---------- omat listat ----------
     def _load_custom(self):
@@ -208,10 +305,11 @@ class Filter:
             url = entry["url"]
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "sihti/1.0"})
-                with urllib.request.urlopen(req, timeout=60) as r:
-                    text = r.read().decode("utf-8", "replace")
-                with open(self._list_file(url), "w", encoding="utf-8") as f:
-                    f.write(text)
+                dest = self._list_file(url)
+                # Suoraan levylle paloina: suurikaan lista ei vie muistia
+                with urllib.request.urlopen(req, timeout=60) as r, open(dest + ".tmp", "wb") as f:
+                    shutil.copyfileobj(r, f, 1 << 16)
+                os.replace(dest + ".tmp", dest)
                 self.list_status[url] = {"updated": time.time(), "error": None}
                 log.info("ladattu %s", url)
             except Exception as e:  # noqa: BLE001 — verkkovirheet kirjataan, vanha kopio jää käyttöön
@@ -221,29 +319,50 @@ class Filter:
         self.last_update = time.time()
 
     def rebuild(self):
-        merged = set()
-        for entry in self.config["lists"]:
-            url = entry["url"]
-            path = self._list_file(url)
-            st = self.list_status.setdefault(url, {"updated": None, "error": None})
-            if not entry.get("enabled", True) or not os.path.exists(path):
-                st["count"] = 0
-                continue
-            with open(path, encoding="utf-8", errors="replace") as f:
-                domains = parse_list(f.read())
-            st["count"] = len(domains)
-            if st.get("updated") is None:
-                st["updated"] = os.path.getmtime(path)
-            # Uudelleenkäynnistyksen jälkeen päivitysaika luetaan tallennetuista tiedostoista
-            if self.last_update is None or st["updated"] > self.last_update:
-                self.last_update = st["updated"]
-            merged |= domains
-        with self._lock:
-            self.blocked = frozenset(merged)
-        log.info("estettäviä verkkotunnuksia: %d", len(merged))
+        """Rakentaa estojoukon listatiedostoista. Vanha joukko on käytössä, kunnes uusi on valmis."""
+        with self._rebuild_lock:
+            self.rebuilding = True
+            try:
+                t0 = time.monotonic()
+                entries, paths = [], []
+                for entry in list(self.config["lists"]):
+                    url = entry["url"]
+                    path = self._list_file(url)
+                    st = self.list_status.setdefault(url, {"updated": None, "error": None})
+                    if not entry.get("enabled", True) or not os.path.exists(path):
+                        st["count"] = 0
+                        continue
+                    entries.append(st)
+                    paths.append(path)
+                    if st.get("updated") is None:
+                        st["updated"] = os.path.getmtime(path)
+                    # Uudelleenkäynnistyksen jälkeen päivitysaika luetaan tallennetuista tiedostoista
+                    if self.last_update is None or st["updated"] > self.last_update:
+                        self.last_update = st["updated"]
+                key = os.urandom(16)   # uusi avain joka rakennukselle: tiivisteitä ei voi ennustaa
+                if paths:
+                    data_b, index_b, count, per_file = _build_isolated(paths, key)
+                    data, index = array("Q"), array("Q")
+                    data.frombytes(data_b)
+                    index.frombytes(index_b)
+                    del data_b, index_b
+                    for st, n in zip(entries, per_file):
+                        st["count"] = n
+                    blocked = DomainSet(key, data, index, count)
+                else:
+                    blocked = DomainSet()
+                with self._lock:
+                    self.blocked = blocked
+                log.info("estettäviä verkkotunnuksia: %d (%.1f s)", len(blocked), time.monotonic() - t0)
+            finally:
+                self.rebuilding = False
+
+    def rebuild_async(self):
+        threading.Thread(target=self.rebuild, daemon=True, name="listat-rakennus").start()
 
     def updater_loop(self, stop_event):
+        self.rebuild()                 # tallennetut listat ensin
         if not self.blocked:
-            self.update_lists()
+            self.update_lists()        # ensimmäinen käynnistys: ladataan
         while not stop_event.wait(max(1, self.config["update_interval_hours"]) * 3600):
             self.update_lists()

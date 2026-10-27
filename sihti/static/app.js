@@ -110,7 +110,8 @@ function renderHeadline() {
   p.append("Viimeisen vuorokauden aikana ", el("b", { text: fmt.format(status.total) }), " kyselyä, joista ",
     el("b", { class: "caught", text: `${fmt.format(status.blocked)} (${String(pct).replace(".", ",")} %)` }), " jäi sihtiin.");
   const facts = [
-    [fmt.format(status.domains_on_lists), "nimeä estolistoilla"],
+    [status.lists_loading && !status.domains_on_lists ? "ladataan…" : fmt.format(status.domains_on_lists),
+     status.lists_loading && status.domains_on_lists ? "nimeä estolistoilla (päivitetään…)" : "nimeä estolistoilla"],
     [fmt.format(status.clients), "laitetta käytti palvelua"],
     [fmt.format(status.cached), "vastausta välimuistista"],
     [dateFmt(status.last_update), "listat päivitetty"],

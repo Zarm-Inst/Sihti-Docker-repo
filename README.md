@@ -181,6 +181,7 @@ python3 -m unittest discover -s tests -v   # testit
 
 - Estolistojen nimet estetään täsmällisinä (lista sisältää yleensä jokaisen aliverkkotunnuksen erikseen). Omat estot ja sallinnat koskevat myös aliverkkotunnuksia.
 - Sallittu-lista voittaa aina eston.
+- Suuretkin estolistat toimivat Pi:llä: viisi miljoonaa nimeä vie noin 120 Mt muistia, koska nimistä tallennetaan vain 8 tavun tiiviste. Listat jäsennetään erillisessä prosessissa taustalla, joten DNS vastaa heti käynnistyksessä ja listojen päivityksen aikana (vanha lista on käytössä, kunnes uusi on valmis). Mittaus 5 miljoonalla nimellä: hitain DNS-vastaus latauksen aikana 22 ms.
 - Jos portti 53 on varattu, `install.sh` poistaa systemd-resolvedin kuuntelijan käytöstä. Muut DNS-palvelut (esim. dnsmasq) pitää pysäyttää itse.
 - Komentorivitoiminnot ajetaan `sihti`-käyttäjänä (`sudo -u sihti …`), jotta tiedostojen omistajuus säilyy.
 - Poisto: `sudo ./uninstall.sh` (asetukset ja loki jäävät) tai `sudo ./uninstall.sh --purge`.

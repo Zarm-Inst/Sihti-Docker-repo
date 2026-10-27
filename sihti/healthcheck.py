@@ -20,11 +20,11 @@ def main():
     msg = struct.pack("!HHHHHH", qid, 0x0100, 1, 0, 0, 0) + name + struct.pack("!HH", 1, 1)
     try:
         with socket.socket(fam, socket.SOCK_DGRAM) as s:
-            s.settimeout(3)
+            s.settimeout(5)
             s.sendto(msg, (host, cfg["dns_port"]))
             if s.recv(512)[:2] != msg[:2]:
                 return 1
-        with socket.create_connection((host, cfg["web_port"]), timeout=3):
+        with socket.create_connection((host, cfg["web_port"]), timeout=5):
             pass
     except OSError as e:
         print(f"epäkunnossa: {e}", file=sys.stderr)

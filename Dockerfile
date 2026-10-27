@@ -30,7 +30,8 @@ USER sihti
 VOLUME ["/data"]
 EXPOSE 53/udp 53/tcp 4000/tcp
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# Väljät rajat hitaille laitteille (Pi Zero/3): käynnistykselle minuutti aikaa
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD ["python3", "-m", "sihti.healthcheck"]
 
 CMD ["python3", "-m", "sihti"]

@@ -84,6 +84,7 @@ class App:
                 "blocking_enabled": self.config["blocking_enabled"],
                 "pause_until": f.pause_until,
                 "domains_on_lists": len(f.blocked),
+                "lists_loading": f.rebuilding,
                 "cache_entries": len(self.resolver.cache),
                 "last_update": f.last_update,
                 "uptime": time.time() - self.qlog.started,
@@ -152,7 +153,7 @@ class App:
                 lists = [l for l in lists if l["url"] != body["url"]]
             if method != "GET":
                 self.config.update(lists=lists)
-                f.rebuild()
+                f.rebuild_async()
             return [{**l, **f.list_status.get(l["url"], {})} for l in self.config["lists"]]
 
         if path == "/api/lists/update" and method == "POST":
