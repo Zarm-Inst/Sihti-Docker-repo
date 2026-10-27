@@ -15,21 +15,21 @@ services:
     container_name: sihti
     restart: unless-stopped
 
-    # Isäntäkoneen verkko on suositus: kyselylokissa näkyvät laitteiden oikeat
-    # osoitteet ja HTTPS-varmenne saa koneen nimen ja IP-osoitteen automaattisesti.
-    # Portit 53 (DNS) ja 4000 (käyttöliittymä) eivät saa olla muun ohjelman käytössä.
-    network_mode: host
+    ports:
+      - "53:53/udp"         # DNS
+      - "53:53/tcp"         # DNS (suuret vastaukset)
+      - "4000:4000/tcp"     # käyttöliittymä (HTTPS)
 
     volumes:
-      - sihti-data:/data        # asetukset, estolistat, kyselyloki ja varmenteet
+      - sihti-data:/data    # asetukset, estolistat, kyselyloki ja varmenteet
 
     environment:
       TZ: Europe/Helsinki
+      # Koneen IP-osoite ja nimet, joilla käyttöliittymä avataan. Ne lisätään
+      # HTTPS-varmenteeseen, jolloin selain hyväksyy yhteyden. Vaihda omaksesi.
+      SIHTI_TLS_EXTRA_NAMES: "192.168.1.10,raspberrypi.local"
       # Valinnaiset asetukset (ympäristömuuttuja voittaa käyttöliittymän asetuksen):
-      # SIHTI_WEB_PORT: "4000"                       # käyttöliittymän portti
-      # SIHTI_DNS_PORT: "53"                         # DNS-portti
       # SIHTI_UPSTREAMS: "1.1.1.1,9.9.9.9"           # ylävirran DNS-palvelimet
-      # SIHTI_TLS_EXTRA_NAMES: "sihti.koti"          # lisänimet HTTPS-varmenteeseen
       # SIHTI_LOG_RETENTION_DAYS: "7"                # kyselylokin säilytys
 
     # Rajoittaa kontin oman lokin kokoa (säästää Pi:n muistikorttia)
@@ -39,16 +39,8 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # Älä lisää "security_opt: no-new-privileges": se estää kontin pääsyn
-    # porttiin 53, koska kontti ajetaan tavallisena käyttäjänä, ei rootina.
-
-    # ---- Vaihtoehto ilman isäntäverkkoa ----
-    # Poista yllä oleva network_mode-rivi ja ota käyttöön nämä. Lisää silloin
-    # koneen IP-osoite varmenteeseen: SIHTI_TLS_EXTRA_NAMES: "192.168.1.10"
-    # ports:
-    #   - "53:53/udp"
-    #   - "53:53/tcp"
-    #   - "4000:4000/tcp"
+    # Älä lisää "security_opt: no-new-privileges": kontti ajetaan tavallisena
+    # käyttäjänä, ja asetus estää sen pääsyn porttiin 53.
 
 volumes:
   sihti-data:
