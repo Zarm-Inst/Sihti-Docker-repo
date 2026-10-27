@@ -1,0 +1,30 @@
+[Unit]
+Description=Sihti DNS-suodatin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sihti
+Group=sihti
+ExecStart=/usr/bin/python3 -m sihti --config /etc/sihti/sihti.json
+WorkingDirectory=/opt/sihti
+Restart=on-failure
+RestartSec=3
+
+# DNS-portti 53 ilman root-oikeuksia (käyttöliittymä on portissa 4000)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Eristys
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/sihti /etc/sihti
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,79 @@
+# Testaa koodin ja rakentaa Docker-kontin Raspberry Pi:lle (arm64, arm/v7) ja PC:lle (amd64).
+# Kontti julkaistaan GitHubin kontti­rekisteriin: ghcr.io/<omistaja>/<repo>
+#  - main-haara  -> :latest ja :sha-xxxxxxx
+#  - tagi v1.2.3 -> :1.2.3, :1.2 ja :latest
+# Pull requesteissa kontti vain rakennetaan, ei julkaista.
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Yksikkö- ja integraatiotestit
+        run: python -m unittest discover -s tests -v
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Kirjaudu kontti­rekisteriin
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tunnisteet
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+          labels: |
+            org.opencontainers.image.vendor=Zarm Instruments
+
+      - name: Rakenna ja julkaise
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Savutesti (amd64)
+        if: github.event_name != 'pull_request'
+        run: |
+          docker run -d --name sihti -p 1053:53/udp -p 4000:4000 ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA::7}
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' sihti)" = healthy ] && break; sleep 2
+          done
+          docker logs sihti
+          test "$(docker inspect -f '{{.State.Health.Status}}' sihti)" = healthy
+          curl -sk -o /dev/null -w "%{http_code}\n" https://localhost:4000/ | grep -q 200

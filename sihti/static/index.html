@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sihti</title>
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="login" class="login" hidden>
+  <form id="login-form" class="login-box">
+    <h1 class="login-logo"><img src="/logo-full.svg" alt="Sihti – Zarm Instruments" width="260" height="64"></h1>
+    <label for="pw">Salasana</label>
+    <input id="pw" type="password" autocomplete="current-password" required>
+    <button type="submit" class="btn primary">Kirjaudu</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header class="top">
+    <a href="#yleiskuva" class="brand"><img src="/logo.svg" alt="" width="34" height="34"><span>Sihti</span></a>
+    <div class="blocking">
+      <span id="state-dot" class="dot"></span>
+      <span id="state-text">…</span>
+      <button id="toggle" class="btn"></button>
+      <select id="pause" aria-label="Tauota suodatus">
+        <option value="">Tauota…</option>
+        <option value="300">5 min</option>
+        <option value="1800">30 min</option>
+        <option value="3600">1 tunti</option>
+      </select>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="Näkymät">
+    <a href="#yleiskuva">Yleiskuva</a>
+    <a href="#loki">Kyselyloki</a>
+    <a href="#saannot">Omat säännöt</a>
+    <a href="#listat">Estolistat</a>
+    <a href="#asetukset">Asetukset</a>
+  </nav>
+
+  <main>
+    <!-- Yleiskuva -->
+    <section id="v-yleiskuva" class="view">
+      <p class="lead" id="headline">Ladataan…</p>
+      <div class="sieve">
+        <div class="legend"><span class="k ok"></span>Läpäisi <span class="k no"></span>Jäi sihtiin</div>
+        <svg id="chart" role="img" aria-label="Kyselyt viimeisen vuorokauden aikana"></svg>
+        <div class="axis" id="axis"></div>
+      </div>
+      <dl class="facts" id="facts"></dl>
+      <div class="tops">
+        <div><h2>Useimmin estetyt</h2><ol id="top-blocked" class="toplist"></ol></div>
+        <div><h2>Useimmin sallitut</h2><ol id="top-domains" class="toplist"></ol></div>
+        <div><h2>Aktiivisimmat laitteet</h2><ol id="top-clients" class="toplist"></ol></div>
+      </div>
+    </section>
+
+    <!-- Loki -->
+    <section id="v-loki" class="view" hidden>
+      <div class="toolbar">
+        <input id="log-search" type="search" placeholder="Hae verkkotunnusta tai laitetta" aria-label="Haku">
+        <select id="log-status" aria-label="Tila">
+          <option value="">Kaikki</option>
+          <option value="estetty">Estetyt</option>
+          <option value="sallittu">Sallitut</option>
+          <option value="valimuisti">Välimuistista</option>
+          <option value="virhe">Virheet</option>
+        </select>
+        <label class="check"><input id="log-live" type="checkbox" checked> Päivitä jatkuvasti</label>
+      </div>
+      <div class="table-wrap">
+        <table class="log">
+          <thead><tr><th>Aika</th><th>Laite</th><th>Verkkotunnus</th><th>Tyyppi</th><th>Tila</th><th class="r">ms</th><th></th></tr></thead>
+          <tbody id="log-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Säännöt -->
+    <section id="v-saannot" class="view" hidden>
+      <form id="check-form" class="checker">
+        <label for="check-domain">Testaa verkkotunnus</label>
+        <div class="row"><input id="check-domain" placeholder="esim. mainos.example.com" required><button class="btn">Testaa</button></div>
+        <p id="check-result" aria-live="polite"></p>
+      </form>
+      <p class="hint rules-hint">Voit liittää monta verkkotunnusta kerralla, yksi per rivi tai välilyönnein eroteltuina. Myös osoitteet (https://example.com/sivu), <code>*.example.com</code> ja hosts-tiedoston rivit kelpaavat – ne siistitään pelkiksi verkkotunnuksiksi.</p>
+      <div class="rules">
+        <div class="rule-col">
+          <h2>Sallitut</h2>
+          <p class="hint">Näitä ei estetä koskaan, eikä niiden aliverkkotunnuksia.</p>
+          <form class="add" data-kind="allow"><textarea rows="3" placeholder="verkkotunnus.fi&#10;toinen.example.com" required aria-label="Lisää sallittuja"></textarea><div class="add-row"><button class="btn">Salli</button><span class="msg" aria-live="polite"></span></div></form>
+          <ul class="chips" id="list-allow"></ul>
+        </div>
+        <div class="rule-col">
+          <h2>Estetyt</h2>
+          <p class="hint">Estetään listoista riippumatta, myös aliverkkotunnukset.</p>
+          <form class="add" data-kind="deny"><textarea rows="3" placeholder="mainos.example.com&#10;*.seuranta.example.net" required aria-label="Lisää estettyjä"></textarea><div class="add-row"><button class="btn">Estä</button><span class="msg" aria-live="polite"></span></div></form>
+          <ul class="chips" id="list-deny"></ul>
+        </div>
+        <div class="rule-col">
+          <h2>Estolausekkeet</h2>
+          <p class="hint">Säännöllinen lauseke, jota verrataan koko nimeen. Esim. <code>(^|\.)track</code></p>
+          <form class="add" data-kind="deny_regex"><textarea rows="3" placeholder="yksi lauseke per rivi" required aria-label="Lisää lausekkeita"></textarea><div class="add-row"><button class="btn">Lisää</button><span class="msg" aria-live="polite"></span></div></form>
+          <ul class="chips" id="list-deny_regex"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- Listat -->
+    <section id="v-listat" class="view" hidden>
+      <div class="toolbar">
+        <form id="list-add" class="row grow"><input id="list-url" type="url" placeholder="https://… (hosts- tai verkkotunnuslista)" required aria-label="Listan osoite"><button class="btn">Lisää lista</button></form>
+        <button id="list-update" class="btn primary">Päivitä listat nyt</button>
+      </div>
+      <p class="hint" id="list-summary"></p>
+      <ul class="lists" id="lists"></ul>
+    </section>
+
+    <!-- Asetukset -->
+    <section id="v-asetukset" class="view" hidden>
+      <form id="settings" class="settings">
+        <fieldset>
+          <legend>Ylävirran DNS-palvelimet</legend>
+          <p class="hint">Yksi per rivi. Portti voi olla mukana, esim. <code>192.168.1.1:5353</code>.</p>
+          <textarea id="s-upstreams" rows="3"></textarea>
+        </fieldset>
+        <fieldset>
+          <legend>Estetyn nimen vastaus</legend>
+          <label class="radio"><input type="radio" name="block_mode" value="null"> Osoite 0.0.0.0 / :: <span class="hint">nopein, sovellukset luovuttavat heti</span></label>
+          <label class="radio"><input type="radio" name="block_mode" value="nxdomain"> Nimeä ei ole olemassa (NXDOMAIN)</label>
+        </fieldset>
+        <fieldset class="grid2">
+          <label>Lokin säilytys (päivää)<input id="s-retention" type="number" min="1" max="365"></label>
+          <label>Välimuistin koko (nimeä)<input id="s-cache" type="number" min="0" max="1000000"></label>
+          <label>Listojen päivitysväli (tuntia)<input id="s-interval" type="number" min="1" max="720"></label>
+          <label class="check"><input id="s-log" type="checkbox"> Tallenna kyselyloki</label>
+        </fieldset>
+        <button class="btn primary">Tallenna asetukset</button>
+        <span id="settings-msg" class="msg" aria-live="polite"></span>
+      </form>
+
+      <section id="tls" class="settings" aria-labelledby="tls-h">
+        <h2 id="tls-h">Suojattu yhteys (HTTPS)</h2>
+        <p id="tls-state" class="hint"></p>
+        <dl class="kv" id="tls-info"></dl>
+        <div id="tls-ca" hidden>
+          <p>Jotta selain ei varoittaisi yhteydestä, asenna Sihdin varmentaja kerran jokaiselle laitteelle, jolla käytät tätä sivua. Sen jälkeen varmenteen automaattiset uusimiset eivät näy mitenkään. Tarkista asennuksessa, että varmentajan sormenjälki on sama kuin yllä.</p>
+          <p><a class="btn primary" href="/sihti-varmentaja.crt" download>Lataa varmentaja</a></p>
+          <details><summary>Windows</summary><p>Avaa ladattu tiedosto → <i>Asenna varmenne</i> → <i>Paikallinen kone</i> → <i>Sijoita kaikki varmenteet seuraavaan säilöön</i> → <i>Luotetut päävarmenteiden myöntäjät</i>. Käynnistä selain uudelleen.</p></details>
+          <details><summary>macOS</summary><p>Avaa tiedosto, jolloin se lisätään Avainnippuun. Etsi Avainnipussa <i>Sihti paikallinen varmentaja</i>, avaa se ja valitse kohdassa <i>Luottamus</i> → <i>Luota aina</i>.</p></details>
+          <details><summary>iPhone ja iPad</summary><p>Avaa tämä sivu Safarilla ja lataa tiedosto → <i>Asetukset</i> → <i>Profiili ladattu</i> → <i>Asenna</i>. Ota sitten käyttöön kohdassa <i>Asetukset → Yleiset → Tietoja → Varmenteiden luottamusasetukset</i>.</p></details>
+          <details><summary>Android</summary><p>Lataa tiedosto → <i>Asetukset → Tietoturva → Lisää tietoturva-asetuksia → Salaus ja kirjautumistiedot → Asenna varmenne → CA-varmenne</i>. Valikon nimet vaihtelevat valmistajittain.</p></details>
+          <details><summary>Linux ja Firefox</summary><p>Linux: <code>sudo cp sihti-varmentaja.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</code>. Firefox käyttää omaa säilöään: <i>Asetukset → Tietosuoja ja turvallisuus → Näytä varmenteet → Myöntäjät → Tuo</i> ja valitse <i>Luota tähän varmentajaan sivustojen tunnistamisessa</i>.</p></details>
+        </div>
+        <p><button id="tls-renew" class="btn" type="button" hidden>Uusi varmenne nyt</button> <span id="tls-msg" class="msg" aria-live="polite"></span></p>
+      </section>
+
+      <form id="pw-form" class="settings">
+        <fieldset>
+          <legend>Käyttöliittymän salasana</legend>
+          <p class="hint" id="pw-state"></p>
+          <input id="pw-new" type="password" autocomplete="new-password" placeholder="Uusi salasana (tyhjä poistaa)">
+        </fieldset>
+        <button class="btn">Vaihda salasana</button>
+        <span id="pw-msg" class="msg" aria-live="polite"></span>
+      </form>
+
+      <div class="settings danger">
+        <h2>Huolto</h2>
+        <button id="clear-cache" class="btn">Tyhjennä välimuisti</button>
+        <button id="clear-log" class="btn warn">Poista kyselyloki</button>
+        <button id="logout" class="btn" hidden>Kirjaudu ulos</button>
+        <span id="maint-msg" class="msg" aria-live="polite"></span>
+      </div>
+    </section>
+  </main>
+  <footer class="foot">Sihti – Zarm Instruments</footer>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# Sihti Dockerilla.  Käynnistys:  docker compose up -d
+#
+# Isäntäkoneen verkko (network_mode: host) on suositus Raspberry Pi:llä:
+#  - kyselylokissa näkyvät laitteiden oikeat IP-osoitteet
+#  - HTTPS-varmenne saa automaattisesti Pi:n nimen ja IP-osoitteen
+# Portti 53 ei saa olla muun ohjelman käytössä (esim. systemd-resolved tai dnsmasq).
+
+services:
+  sihti:
+    image: ghcr.io/zarm-inst/sihti-docker-repo:latest   # tai rakenna itse: korvaa rivi rivillä "build: ."
+    container_name: sihti
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - sihti-data:/data            # asetukset, estolistat, kyselyloki ja varmenteet
+    environment:
+      TZ: Europe/Helsinki
+      # SIHTI_WEB_PORT: "4000"
+      # SIHTI_UPSTREAMS: "1.1.1.1,9.9.9.9"
+      # SIHTI_TLS_EXTRA_NAMES: "sihti.koti"
+
+    # Vaihtoehto ilman isäntäverkkoa: poista network_mode-rivi ja ota nämä käyttöön.
+    # Lisää silloin Pi:n IP-osoite varmenteeseen: SIHTI_TLS_EXTRA_NAMES: "192.168.1.10"
+    # ports:
+    #   - "53:53/udp"
+    #   - "53:53/tcp"
+    #   - "4000:4000/tcp"
+
+volumes:
+  sihti-data:
