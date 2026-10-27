@@ -18,19 +18,42 @@ Kirjoitettu pelkällä Pythonin standardikirjastolla: ei riippuvuuksia, ei tieto
 
 ## Asennus Dockerilla (suositus)
 
-Valmis kontti on GitHubin konttirekisterissä Raspberry Pi:lle (64- ja 32-bittinen ARM) sekä tavallisille PC:ille:
+Valmis kontti on GitHubin konttirekisterissä Raspberry Pi:lle (64- ja 32-bittinen ARM) sekä tavallisille PC:ille.
 
-```bash
-docker run -d --name sihti --restart unless-stopped --network host \
-  -v sihti-data:/data -e TZ=Europe/Helsinki \
-  ghcr.io/zarm-inst/sihti-docker-repo:latest
+**Docker Compose:** lisää tämä omaan compose-tiedostoosi (tai käytä repon `docker-compose.yml`:ää, jossa on lisäksi kommentoidut lisäasetukset):
+
+```yaml
+services:
+  sihti:
+    image: ghcr.io/zarm-inst/sihti-docker-repo:latest
+    container_name: sihti
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - sihti-data:/data
+    environment:
+      TZ: Europe/Helsinki
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  sihti-data:
 ```
 
-tai `docker compose up -d` repossa olevalla `docker-compose.yml`-tiedostolla (se käyttää valmista konttia).
+```bash
+docker compose up -d                                      # käynnistys
+docker compose pull sihti && docker compose up -d sihti   # päivitys uuteen versioon
+docker compose logs -f sihti                              # loki
+```
 
-- **`--network host`** on suositus: kyselylokissa näkyvät laitteiden oikeat osoitteet, ja HTTPS-varmenne saa automaattisesti Pi:n nimen ja IP-osoitteen. Ilman sitä julkaise portit `-p 53:53/udp -p 53:53/tcp -p 4000:4000` ja lisää Pi:n osoite varmenteeseen: `-e SIHTI_TLS_EXTRA_NAMES=192.168.1.10`.
-- Kaikki tiedot (asetukset, listat, loki, varmenteet) ovat volyymissa `/data`. Kontin voi päivittää menettämättä mitään: `docker pull … && docker rm -f sihti && docker run …`.
-- Kontti ajetaan tavallisena käyttäjänä (uid 10053), ei rootina.
+Ilman Composea sama onnistuu komennolla `docker run -d --name sihti --restart unless-stopped --network host -v sihti-data:/data -e TZ=Europe/Helsinki ghcr.io/zarm-inst/sihti-docker-repo:latest`.
+
+- **Isäntäverkko** (`network_mode: host`) on suositus: kyselylokissa näkyvät laitteiden oikeat osoitteet, ja HTTPS-varmenne saa automaattisesti Pi:n nimen ja IP-osoitteen. Ilman sitä julkaise portit 53/udp, 53/tcp ja 4000 ja lisää Pi:n osoite varmenteeseen: `SIHTI_TLS_EXTRA_NAMES: "192.168.1.10"` (ks. `docker-compose.yml`).
+- Kaikki tiedot (asetukset, listat, loki, varmenteet) ovat volyymissa `/data`. Kontin voi päivittää menettämättä mitään.
+- Kontti ajetaan tavallisena käyttäjänä (uid 10053), ei rootina. Älä lisää asetusta `security_opt: no-new-privileges`, koska se estää pääsyn porttiin 53.
 - Varmentajan saa ulos kontista komennolla `docker cp sihti:/data/tls/ca.crt sihti-varmentaja.crt` tai käyttöliittymästä.
 - Kontilla on terveystarkistus: `docker ps` näyttää tilan `healthy`.
 

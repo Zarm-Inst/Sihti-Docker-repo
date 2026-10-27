@@ -1,26 +1,50 @@
-# Sihti Dockerilla.  Käynnistys:  docker compose up -d
+# Sihti – DNS-suodatin (Zarm Instruments)
 #
-# Isäntäkoneen verkko (network_mode: host) on suositus Raspberry Pi:llä:
-#  - kyselylokissa näkyvät laitteiden oikeat IP-osoitteet
-#  - HTTPS-varmenne saa automaattisesti Pi:n nimen ja IP-osoitteen
-# Portti 53 ei saa olla muun ohjelman käytössä (esim. systemd-resolved tai dnsmasq).
+# Käynnistys:  docker compose up -d
+# Päivitys:    docker compose pull sihti && docker compose up -d sihti
+# Loki:        docker compose logs -f sihti
+#
+# Omaan compose-tiedostoon: kopioi "sihti:"-palvelu services-kohdan alle ja
+# "sihti-data:"-rivi tiedoston volumes-kohtaan.
+#
+# Käyttöliittymä: https://<koneen osoite>:4000/
 
 services:
   sihti:
-    image: ghcr.io/zarm-inst/sihti-docker-repo:latest   # tai rakenna itse: korvaa rivi rivillä "build: ."
+    image: ghcr.io/zarm-inst/sihti-docker-repo:latest
     container_name: sihti
     restart: unless-stopped
+
+    # Isäntäkoneen verkko on suositus: kyselylokissa näkyvät laitteiden oikeat
+    # osoitteet ja HTTPS-varmenne saa koneen nimen ja IP-osoitteen automaattisesti.
+    # Portit 53 (DNS) ja 4000 (käyttöliittymä) eivät saa olla muun ohjelman käytössä.
     network_mode: host
+
     volumes:
-      - sihti-data:/data            # asetukset, estolistat, kyselyloki ja varmenteet
+      - sihti-data:/data        # asetukset, estolistat, kyselyloki ja varmenteet
+
     environment:
       TZ: Europe/Helsinki
-      # SIHTI_WEB_PORT: "4000"
-      # SIHTI_UPSTREAMS: "1.1.1.1,9.9.9.9"
-      # SIHTI_TLS_EXTRA_NAMES: "sihti.koti"
+      # Valinnaiset asetukset (ympäristömuuttuja voittaa käyttöliittymän asetuksen):
+      # SIHTI_WEB_PORT: "4000"                       # käyttöliittymän portti
+      # SIHTI_DNS_PORT: "53"                         # DNS-portti
+      # SIHTI_UPSTREAMS: "1.1.1.1,9.9.9.9"           # ylävirran DNS-palvelimet
+      # SIHTI_TLS_EXTRA_NAMES: "sihti.koti"          # lisänimet HTTPS-varmenteeseen
+      # SIHTI_LOG_RETENTION_DAYS: "7"                # kyselylokin säilytys
 
-    # Vaihtoehto ilman isäntäverkkoa: poista network_mode-rivi ja ota nämä käyttöön.
-    # Lisää silloin Pi:n IP-osoite varmenteeseen: SIHTI_TLS_EXTRA_NAMES: "192.168.1.10"
+    # Rajoittaa kontin oman lokin kokoa (säästää Pi:n muistikorttia)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Älä lisää "security_opt: no-new-privileges": se estää kontin pääsyn
+    # porttiin 53, koska kontti ajetaan tavallisena käyttäjänä, ei rootina.
+
+    # ---- Vaihtoehto ilman isäntäverkkoa ----
+    # Poista yllä oleva network_mode-rivi ja ota käyttöön nämä. Lisää silloin
+    # koneen IP-osoite varmenteeseen: SIHTI_TLS_EXTRA_NAMES: "192.168.1.10"
     # ports:
     #   - "53:53/udp"
     #   - "53:53/tcp"
