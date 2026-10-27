@@ -90,9 +90,12 @@ def _host_names():
             hosts.add(h)
     except OSError:
         pass
-    h = socket.gethostname().split(".")[0].lower()
-    if h:
-        hosts.add(h)
+    if not hosts:
+        # Kontin oma nimi on satunnainen ja vaihtuu, kun kontti luodaan uudelleen:
+        # käytetään sitä vain, jos isäntäkoneen nimeä ei ole liitetty.
+        h = socket.gethostname().split(".")[0].lower()
+        if h:
+            hosts.add(h)
     return hosts
 
 

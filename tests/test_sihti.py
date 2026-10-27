@@ -347,5 +347,55 @@ class TestSharedCA(unittest.TestCase):
         self.assertEqual(len(fps), 2, "laitteilla omat palvelinvarmenteet, yhteinen varmentaja")
 
 
+class TestRandomPassword(unittest.TestCase):
+    """Docker-tila: uusi satunnainen salasana jokaisella käynnistyksellä, rivi stdoutiin."""
+    def test_format(self):
+        from sihti.web import random_password
+        import re
+        for _ in range(200):
+            self.assertRegex(random_password(), r"^(?=.*[A-Z])(?=.*[a-z])(?=.*[0-9])[A-Za-z0-9]{10}$")
+        self.assertIsNone(re.search(r"\s", random_password()))
+
+    def test_new_password_each_start_and_login(self):
+        import subprocess
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        root = os.path.join(os.path.dirname(__file__), "..")
+        web_port = free_port()
+        env = dict(os.environ, SIHTI_RANDOM_PASSWORD="true", SIHTI_HTTPS="false",
+                   SIHTI_DATA_DIR=d, SIHTI_DNS_LISTEN="127.0.0.1", SIHTI_DNS_PORT=str(free_port(socket.SOCK_DGRAM)),
+                   SIHTI_WEB_LISTEN="127.0.0.1", SIHTI_WEB_PORT=str(web_port), SIHTI_UPDATE_INTERVAL_HOURS="720")
+        cfg = os.path.join(d, "sihti.json")
+        with open(cfg, "w") as f:
+            json.dump({"lists": []}, f)
+        passwords = []
+        for _ in range(2):
+            p = subprocess.Popen([sys.executable, "-m", "sihti", "--config", cfg], cwd=root, env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            try:
+                line = p.stdout.readline().strip()
+                # Täsmälleen käyttäjän skriptin poiminta: grep "random password" | awk '{print $NF}'
+                self.assertIn("random password", line)
+                self.assertIn("Sihti", line)
+                pw = line.split()[-1]
+                passwords.append(pw)
+                time.sleep(0.5)
+                base = f"http://127.0.0.1:{web_port}"
+                bad = urllib.request.Request(base + "/api/login", method="POST", data=b'{"password":"vaara"}',
+                                             headers={"Content-Type": "application/json"})
+                with self.assertRaises(urllib.error.HTTPError):
+                    urllib.request.urlopen(bad, timeout=5)
+                ok = urllib.request.Request(base + "/api/login", method="POST",
+                                            data=json.dumps({"password": pw}).encode(),
+                                            headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(ok, timeout=5) as r:
+                    self.assertEqual(json.load(r), {"ok": True})
+            finally:
+                p.terminate()
+                p.wait(10)
+                p.stdout.close()
+        self.assertNotEqual(passwords[0], passwords[1], "jokaisella käynnistyksellä uusi salasana")
+
+
 if __name__ == "__main__":
     unittest.main()

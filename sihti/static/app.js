@@ -298,7 +298,12 @@ async function loadSettings() {
   $("#s-interval").value = s.update_interval_hours;
   $("#s-log").checked = s.log_queries;
   loadTls();
-  $("#pw-state").textContent = s.has_password ? "Salasana on asetettu." : "Salasanaa ei ole asetettu – kuka tahansa lähiverkossa voi muuttaa asetuksia.";
+  const randomPw = !!s.random_password;
+  $("#pw-new").hidden = randomPw;
+  $("#pw-form button").hidden = randomPw;
+  $("#pw-state").textContent = randomPw
+    ? "Salasana vaihtuu satunnaiseksi jokaisella käynnistyksellä. Nykyinen salasana näkyy kontin lokissa: docker logs sihti | grep \"random password\" | tail -n1"
+    : s.has_password ? "Salasana on asetettu." : "Salasanaa ei ole asetettu – kuka tahansa lähiverkossa voi muuttaa asetuksia.";
 }
 async function loadTls() {
   const t = await api("/api/tls");

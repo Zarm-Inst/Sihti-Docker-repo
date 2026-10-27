@@ -32,6 +32,11 @@ services:
 
     environment:
       TZ: Europe/Helsinki
+      # Uusi satunnainen 10 merkin salasana jokaisella käynnistyksellä. Se tulostuu
+      # kontin lokiin riville "Sihti random password: <salasana>". Uusin salasana:
+      #   docker logs sihti 2>/dev/null | grep "random password" | tail -n1 | awk '{print $NF}'
+      # "false" = salasana asetetaan käyttöliittymästä ja se säilyy.
+      SIHTI_RANDOM_PASSWORD: "true"
       # SIHTI_TLS_CA_CERT: /ca/ca.crt
       # SIHTI_TLS_CA_KEY: /ca/ca.key
       # Valinnaiset asetukset (ympäristömuuttuja voittaa käyttöliittymän asetuksen):

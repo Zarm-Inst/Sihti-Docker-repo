@@ -53,6 +53,20 @@ docker compose pull sihti && docker compose up -d sihti   # päivitys uuteen ver
 docker compose logs -f sihti                              # loki
 ```
 
+**Salasana:** kontti luo jokaisella käynnistyksellä uuden satunnaisen 10 merkin salasanan (A–Z, a–z, 0–9) ja tulostaa sen kontin lokiin (stdout):
+
+```
+Sihti random password: Xq7rTb2mKa
+```
+
+Uusin salasana skriptissä:
+
+```bash
+webpass=$(docker logs "$CONTAINER" 2>/dev/null | grep "random password" | tail -n1 | awk '{print $NF}')
+```
+
+Käytä `tail -n1` eikä `grep -m1`: Docker säilyttää kontin lokin `docker restart`in ja Pi:n uudelleenkäynnistyksen yli, joten lokissa on silloin useita salasanarivejä ja vain viimeinen on voimassa. (`grep -m1` toimii vain, jos kontti luodaan aina uudelleen, esim. `docker compose up -d --force-recreate`.) Toiminnon saa pois asetuksella `SIHTI_RANDOM_PASSWORD: "false"`, jolloin salasana asetetaan käyttöliittymästä.
+
 **Miten HTTPS-varmenne saa koneen nimen ja osoitteen ilman asetuksia:**
 
 - *Nimi:* `/etc/hostname`-liitos kertoo kontille koneen nimen, joten varmenne kattaa heti esim. `pi-olohuone.local`. Myös muut paikalliset nimet (`.local`, `.lan`, `.home`, `.internal`, `.koti` tai pisteetön nimi) lisätään automaattisesti jo ensimmäisellä yhteydellä.
@@ -135,6 +149,7 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 | `lists` | yksi lista | Estolistojen osoitteet |
 | `update_interval_hours` | `24` | Listojen päivitysväli |
 | `https` | `true` | HTTPS käyttöliittymään (`false` = pelkkä HTTP) |
+| `random_password` | `false` (Dockerissa `true`) | Uusi satunnainen salasana jokaisella käynnistyksellä, tulostuu lokiin |
 | `tls_extra_names` | `[]` | Lisänimet ja -osoitteet varmenteeseen |
 | `tls_learn_names` | `true` | Lisää käyttöliittymän avaamiseen käytetty lähiverkko-osoite tai paikallinen nimi varmenteeseen |
 | `tls_ca_cert`, `tls_ca_key` | tyhjä | Yhteinen varmentaja usealle laitteelle; tyhjä = laite luo oman |

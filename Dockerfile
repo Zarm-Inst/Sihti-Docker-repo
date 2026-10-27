@@ -23,7 +23,8 @@ COPY sihti/ /app/sihti/
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     SIHTI_CONFIG=/data/sihti.json \
-    SIHTI_DATA_DIR=/data
+    SIHTI_DATA_DIR=/data \
+    SIHTI_RANDOM_PASSWORD=true
 
 USER sihti
 VOLUME ["/data"]

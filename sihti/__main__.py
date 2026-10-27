@@ -4,6 +4,7 @@ import getpass
 import logging
 import os
 import signal
+import sys
 import threading
 
 from .config import Config
@@ -11,7 +12,7 @@ from .filtering import Filter
 from .querylog import QueryLog
 from .resolver import Resolver, start_servers
 from .tls import CertManager, TLSError, openssl_available
-from .web import App, hash_password, start_web
+from .web import App, hash_password, random_password, start_web
 
 
 def main():
@@ -58,6 +59,14 @@ def main():
         filt.update_lists()
         print(f"Estettäviä verkkotunnuksia: {len(filt.blocked)}")
         return
+
+    if config["random_password"]:
+        # Uusi salasana jokaisella käynnistyksellä. Rivi tulostetaan vakiotulosteeseen (stdout),
+        # jotta "docker logs <kontti> | grep" näkee sen; muu loki menee stderr:iin.
+        # Viimeinen sana on salasana: ... | grep "random password" | awk '{print $NF}'
+        pw = random_password(10)
+        config.update(password_hash=hash_password(pw))
+        print(f"Sihti random password: {pw}", file=sys.stdout, flush=True)
 
     stop = threading.Event()
     qlog = QueryLog(config)

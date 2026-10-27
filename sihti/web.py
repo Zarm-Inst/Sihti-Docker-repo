@@ -27,6 +27,18 @@ def hash_password(password):
     return f"pbkdf2${salt}${dk.hex()}"
 
 
+PASSWORD_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def random_password(length=10):
+    """Satunnainen salasana tavallisista merkeistä (A–Z, a–z, 0–9), aina vähintään yksi
+    iso kirjain, pieni kirjain ja numero."""
+    while True:
+        pw = "".join(secrets.choice(PASSWORD_CHARS) for _ in range(length))
+        if any(c.isupper() for c in pw) and any(c.islower() for c in pw) and any(c.isdigit() for c in pw):
+            return pw
+
+
 def verify_password(password, stored):
     try:
         _, salt, digest = stored.split("$")
@@ -169,7 +181,8 @@ class App:
                 self.config.update(**changes)
                 self.resolver.cache.size = self.config["cache_size"]
                 self.resolver.cache.clear()
-            return {k: self.config[k] for k in keys} | {"has_password": self.auth_required()}
+            return {k: self.config[k] for k in keys} | {"has_password": self.auth_required(),
+                                                         "random_password": bool(self.config["random_password"])}
 
         if path == "/api/tls" and method == "GET":
             if not self.certs:

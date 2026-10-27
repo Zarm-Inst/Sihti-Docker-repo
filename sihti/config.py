@@ -20,6 +20,7 @@ DEFAULTS = {
     ],
     "update_interval_hours": 24,
     "password_hash": "",           # tyhjä = ei salasanaa
+    "random_password": False,      # uusi satunnainen salasana jokaisella käynnistyksellä (Docker: päällä)
     "https": True,                 # käyttöliittymä HTTPS:llä (http-osoitteet ohjataan https:ään)
     "tls_extra_names": [],         # lisänimet/IP:t varmenteeseen, esim. ["sihti.koti", "10.0.0.5"]
     "tls_cert": "",                # oma varmenne (PEM, ketju); tyhjä = luodaan automaattisesti
