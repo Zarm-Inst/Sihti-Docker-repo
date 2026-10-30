@@ -7,7 +7,7 @@ Kirjoitettu pelkällä Pythonin standardikirjastolla: ei riippuvuuksia, ei tieto
 ## Ominaisuudet
 
 - DNS-palvelin UDP:llä ja TCP:llä (IPv4 ja IPv6), välitys valitsemillesi ylävirtapalvelimille
-- Estolistat hosts-muodossa, pelkkinä nimilistoina tai `||nimi^` -muodossa; automaattinen päivitys
+- Estolistat hosts-muodossa, pelkkinä nimilistoina tai `||nimi^` -muodossa; automaattinen päivitys. Vain muuttuneet listat ladataan ja käsitellään (ETag / Last-Modified ja sisällön tarkistus), muuttuneet rinnakkain, ja käsitellyt listat säilytetään välimuistissa, joten listan lisäys, poisto ja uudelleenkäynnistys ovat nopeita
 - Omat sallitut ja estetyt verkkotunnukset (koskevat myös aliverkkotunnuksia) sekä säännölliset lausekkeet
 - Välimuisti, joka noudattaa vastausten TTL-arvoja
 - Kyselyloki SQLiteen, haku ja suodatus, estä/salli yhdellä napilla; jokaisen eston syy näkyy lokissa (mikä estolista, oma sääntö tai lauseke)

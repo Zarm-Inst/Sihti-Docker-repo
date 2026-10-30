@@ -113,6 +113,20 @@ class TestParseList(unittest.TestCase):
         self.assertEqual(parse_list(text), {"ads.example.com", "tracker.example.net", "banner.example.org"})
 
 
+def build_with_other_key(path):
+    """Eri avaimella rakennettu joukko ei saa käyttää toisen avaimen välimuistia."""
+    from sihti.filtering import DomainSet, build_domain_set
+    from array import array
+    key = os.urandom(16)
+    data_b, index_b, count, _, _, _ = build_domain_set([path], key)
+    data, index = array("Q"), array("Q")
+    data.frombytes(data_b)
+    index.frombytes(index_b)
+    ds = DomainSet(key, data, index, count)
+    assert "uusi.example.com" in ds and "vanha.example.com" in ds
+    return ds
+
+
 class TestDomainSet(unittest.TestCase):
     def test_build_and_lookup(self):
         from sihti.filtering import DomainSet, build_domain_set, _build_isolated
@@ -143,6 +157,36 @@ class TestDomainSet(unittest.TestCase):
             self.assertIsNone(ds.lookup("x1.esimerkki.fi"))
         self.assertNotIn("a.fi", DomainSet())
         self.assertIsNone(DomainSet().lookup("a.fi"))
+
+    def test_cache_reused_and_invalidated(self):
+        from sihti.filtering import DomainSet, build_domain_set
+        from array import array
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "a.txt")
+        with open(p, "w") as f:
+            f.write("0.0.0.0 vanha.example.com\n")
+        key = os.urandom(16)
+
+        def build():
+            data_b, index_b, count, _, mask_type, masks_b = build_domain_set([p], key)
+            data, index, masks = array("Q"), array("Q"), array(mask_type)
+            data.frombytes(data_b)
+            index.frombytes(index_b)
+            masks.frombytes(masks_b)
+            return DomainSet(key, data, index, count, masks, ("a",))
+        self.assertIn("vanha.example.com", build())
+        cache = os.path.join(d, "a.fp")
+        self.assertTrue(os.path.exists(cache))
+        with open(p, "a") as f:   # lista muuttuu: välimuisti ei kelpaa
+            f.write("0.0.0.0 uusi.example.com\n")
+        ds = build()
+        self.assertEqual(len(ds), 2)
+        self.assertEqual(ds.lookup("uusi.example.com"), ["a"])
+        with open(cache, "r+b") as f:   # vioittunut välimuisti: lista jäsennetään uudelleen
+            f.truncate(100)
+        self.assertEqual(len(build()), 2)
+        self.assertNotIn("x.example.com", build_with_other_key(p))
 
     def test_mask_width(self):
         from sihti.filtering import _mask_type
@@ -207,6 +251,76 @@ class TestLearnable(unittest.TestCase):
             self.assertEqual(learnable(raw), want, raw)
         for raw in ("8.8.8.8", "127.0.0.1", "0.0.0.0", "example.com", "pankki.fi:4000", "a b", "", "x" * 300 + ".local"):
             self.assertIsNone(learnable(raw), raw)
+
+
+class TestListUpdates(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.src = os.path.join(self.dir, "lahde.txt")
+        with open(self.src, "w") as f:
+            f.write("0.0.0.0 eka.example.com\n")
+        cfg_path = os.path.join(self.dir, "sihti.json")
+        with open(cfg_path, "w") as f:
+            json.dump({"data_dir": self.dir, "lists": [{"url": "file://" + self.src, "enabled": True}]}, f)
+        self.cfg = Config(cfg_path)
+
+    def test_unchanged_list_skips_rebuild(self):
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        first = filt.blocked
+        self.assertIn("eka.example.com", first)
+        filt.update_lists()   # sama sisältö: ei uutta rakennusta
+        self.assertIs(filt.blocked, first)
+        with open(self.src, "a") as f:
+            f.write("0.0.0.0 toka.example.com\n")
+        filt.update_lists()
+        self.assertIsNot(filt.blocked, first)
+        self.assertIn("toka.example.com", filt.blocked)
+        self.assertFalse(filt.updating)
+
+    def test_restart_uses_saved_key_and_cache(self):
+        Filter(self.cfg).update_lists()
+        filt = Filter(self.cfg)   # uudelleenkäynnistys: listaa ei ladata, tiivisteet välimuistista
+        filt.update_lists(missing_only=True)
+        self.assertIn("eka.example.com", filt.blocked)
+        self.assertEqual(filt.blocked.lookup("eka.example.com"), ["file://" + self.src])
+
+    def test_new_list_downloaded_and_removed_files_cleaned(self):
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        other = os.path.join(self.dir, "toinen.txt")
+        with open(other, "w") as f:
+            f.write("||uusi.example.org^\n")
+        self.cfg.update(lists=self.cfg["lists"] + [{"url": "file://" + other, "enabled": True}])
+        filt.update_lists(missing_only=True)
+        self.assertEqual(len(filt.blocked), 2)
+        old_files = {f for f in os.listdir(filt.lists_dir) if f.endswith((".txt", ".fp"))}
+        self.cfg.update(lists=self.cfg["lists"][1:])
+        filt.update_lists(missing_only=True)
+        self.assertEqual(len(filt.blocked), 1)
+        files = {f for f in os.listdir(filt.lists_dir) if f.endswith((".txt", ".fp"))}
+        self.assertEqual(len(old_files - files), 2, "poistetun listan tiedosto ja välimuisti pois")
+
+    def test_crashed_build_keeps_old_set(self):
+        from unittest import mock
+        from concurrent.futures.process import BrokenProcessPool
+        import sihti.filtering as F
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        first = filt.blocked
+        with open(self.src, "a") as f:
+            f.write("0.0.0.0 toka.example.com\n")
+        broken = mock.MagicMock()
+        broken.submit.return_value.result.side_effect = BrokenProcessPool()
+        with mock.patch.object(F, "ProcessPoolExecutor", return_value=broken):
+            filt.update_lists()
+        self.assertIs(filt.blocked, first)
+        self.assertIn("muisti", filt.build_error)
+        self.assertFalse(filt.updating, "kaatunut rakennus ei saa jäädä roikkumaan")
+        filt.update_lists()   # seuraava yritys onnistuu
+        self.assertIn("toka.example.com", filt.blocked)
+        self.assertIsNone(filt.build_error)
 
 
 class TestQueryLogMigration(unittest.TestCase):
@@ -338,6 +452,37 @@ class TestService(unittest.TestCase):
         passed = self.api("/api/log?status=lapaisi")
         self.assertTrue(any(r["domain"] == "lapi.example.org" for r in passed))
         self.assertTrue(all(r["status"] in ("sallittu", "valimuisti") for r in passed))
+
+    def test_added_list_counted_right_away(self):
+        import functools
+        from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+        www = os.path.join(self.dir, "www")
+        os.makedirs(www)
+        with open(os.path.join(www, "lisa.txt"), "w") as f:
+            f.write("0.0.0.0 lisa1.example.com\n0.0.0.0 lisa2.example.com\n")
+        handler = functools.partial(SimpleHTTPRequestHandler, directory=www)
+        handler.log_message = lambda *a: None
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        extra = f"http://127.0.0.1:{srv.server_address[1]}/lisa.txt"
+        before = self.api("/api/status")["domains_on_lists"]
+        self.api("/api/lists", "POST", {"url": extra})
+        for _ in range(100):
+            s = self.api("/api/status")
+            if not s["lists_updating"]:
+                break
+            time.sleep(0.1)
+        self.assertEqual(s["domains_on_lists"], before + 2)
+        lst = next(l for l in self.api("/api/lists") if l["url"] == extra)
+        self.assertEqual((lst["count"], lst["error"]), (2, None))
+        self.api("/api/lists", "DELETE", {"url": extra})
+        for _ in range(100):
+            if not self.api("/api/status")["lists_updating"]:
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.api("/api/status")["domains_on_lists"], before)
 
     def test_reason_for_custom_rules(self):
         self.api("/api/custom", "POST", {"kind": "deny", "value": "syy.example.com"})

@@ -1,14 +1,18 @@
 """Estolistojen lataus, jäsennys ja verkkotunnusten tarkistus."""
 import hashlib
 import json
-import shutil
+import multiprocessing
 from array import array
 from bisect import bisect_left
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 import logging
 import os
 import re
+import struct
 import threading
 import time
+import urllib.error
 import urllib.request
 
 log = logging.getLogger("sihti.suodatin")
@@ -113,45 +117,109 @@ def fingerprint(name, key):
     return int.from_bytes(hashlib.blake2b(name.encode(), digest_size=8, key=key).digest(), "big")
 
 
+_BUCKETS = 1 << (64 - DomainSet.SHIFT)
+
+
+def _fingerprint_file(f, key):
+    """Yhden listan nimet tiivisteiksi: lajiteltu taulukko ilman päällekkäisiä sekä sen
+    lohkohakemisto. Palauttaa (data, index, nimiä)."""
+    shift = DomainSet.SHIFT
+    buckets = [array("Q") for _ in range(_BUCKETS)]
+    copy = hashlib.blake2b(digest_size=8, key=key).copy   # avain alustetaan kerran, ei joka nimelle
+    to_int = int.from_bytes
+    n = 0
+    for name in iter_domains(f):
+        h = copy()
+        h.update(name.encode())
+        v = to_int(h.digest(), "big")   # sama arvo kuin fingerprint(name, key)
+        buckets[v >> shift].append(v)
+        n += 1
+    data, index = array("Q"), array("Q", [0])
+    for i, a in enumerate(buckets):
+        if a:
+            data.extend(sorted(set(a)))   # päällekkäiset pois, lajittelu hakua varten
+            buckets[i] = None
+        index.append(len(data))
+    return data, index, n
+
+
+_CACHE_HEAD = struct.Struct("<8s8sqqqq")   # tunniste, avaimen tunniste, koko, muokattu, nimiä, tiivisteitä
+_CACHE_MAGIC = b"SIHTI-1\n"
+
+
+def _list_fingerprints(path, key, load=True):
+    """Kuten _fingerprint_file, mutta tulos tallennetaan listan viereen (.fp). Kun lista ei ole
+    muuttunut, tiivisteet luetaan sieltä eikä listaa tarvitse jäsentää uudelleen.
+    load=False: varmistetaan vain, että välimuisti on ajan tasalla (palauttaa None)."""
+    cache = os.path.splitext(path)[0] + ".fp"
+    key_id = hashlib.blake2b(key, digest_size=8).digest()
+    with open(path, encoding="utf-8", errors="replace") as f:
+        st = os.fstat(f.fileno())
+        try:
+            with open(cache, "rb") as c:
+                magic, kid, size, mtime, n, count = _CACHE_HEAD.unpack(c.read(_CACHE_HEAD.size))
+                if (magic, kid, size, mtime) == (_CACHE_MAGIC, key_id, st.st_size, st.st_mtime_ns):
+                    if not load:
+                        return None
+                    index, data = array("Q"), array("Q")
+                    index.fromfile(c, _BUCKETS + 1)
+                    data.fromfile(c, count)
+                    return data, index, n
+        except (OSError, EOFError, ValueError, struct.error):   # puuttuva tai vioittunut välimuisti
+            pass
+        data, index, n = _fingerprint_file(f, key)
+    try:
+        with open(cache + ".tmp", "wb") as c:
+            c.write(_CACHE_HEAD.pack(_CACHE_MAGIC, key_id, st.st_size, st.st_mtime_ns, n, len(data)))
+            index.tofile(c)
+            data.tofile(c)
+        os.replace(cache + ".tmp", cache)
+    except OSError as e:
+        log.warning("välimuistia ei voitu tallentaa %s: %s", cache, e)
+    return (data, index, n) if load else None
+
+
+def _merge(parts, mask_type):
+    """Yhdistää listojen taulukot [(data, index)]: jokainen nimi kerran, ja bittimaski kertoo,
+    millä listoilla se on. Päällekkäisyydet etsitään joukko-operaatioilla lohkoittain."""
+    if len(parts) == 1:
+        data, index = parts[0]
+        return data, index, array(mask_type, [1]) * len(data)
+    data, index, masks = array("Q"), array("Q", [0]), array(mask_type)
+    bits = [1 << k if k < 64 else 0 for k in range(len(parts))]   # yli 64 listaa: syy ilman listan nimeä
+    for b in range(_BUCKETS):
+        slices = [(bit, d[ix[b]:ix[b + 1]]) for bit, (d, ix) in zip(bits, parts) if ix[b] != ix[b + 1]]
+        if len(slices) == 1:
+            bit, sl = slices[0]
+            data.extend(sl)
+            masks.extend(array(mask_type, [bit]) * len(sl))
+        elif slices:
+            merged = {}
+            for bit, sl in slices:
+                both = {h: merged[h] for h in merged.keys() & sl}   # jo aiemmilla listoilla
+                merged.update(dict.fromkeys(sl, bit))
+                for h, m in both.items():
+                    merged[h] = m | bit
+            keys = sorted(merged)
+            data.extend(keys)
+            masks.extend(map(merged.__getitem__, keys))
+        index.append(len(data))
+    return data, index, masks
+
+
 def build_domain_set(paths, key):
     """Lukee listatiedostot ja rakentaa DomainSetin raakadatan. Ajetaan omassa prosessissaan,
     jotta raskas jäsennys ei hidasta DNS-vastauksia (Pythonin GIL). Palauttaa
     (data_bytes, index_bytes, nimiä_yhteensä, [rivejä_per_tiedosto], maskin_tyyppi, maskit_bytes)."""
-    nb = 1 << (64 - DomainSet.SHIFT)
-    buckets = [array("Q") for _ in range(nb)]
-    mask_type = _mask_type(len(paths))
-    owners = [array(mask_type) for _ in range(nb)]   # rinnakkain: minkä listan bitti
-    shift = DomainSet.SHIFT
-    per_file = []
-    for n_file, path in enumerate(paths):
-        bit = 1 << n_file if n_file < 64 else 0   # yli 64 listaa: syy jää ilman listan nimeä
-        n = 0
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for name in iter_domains(f):
-                h = fingerprint(name, key)
-                b = h >> shift
-                buckets[b].append(h)
-                owners[b].append(bit)
-                n += 1
+    parts, per_file = [], []
+    for path in paths:
+        data, index, n = _list_fingerprints(path, key)
+        parts.append((data, index))
         per_file.append(n)
-    data = array("Q")
-    index = array("Q", [0])
-    masks = array(mask_type)
-    for i, a in enumerate(buckets):
-        if a:
-            o = owners[i]
-            if o.count(o[0]) == len(o):   # kaikki samalta listalta: nopea tie
-                keys = sorted(set(a))     # päällekkäiset pois, lajittelu hakua varten
-                masks.extend(array(mask_type, [o[0]]) * len(keys))
-            else:
-                merged = {}
-                for h, m in zip(a, o):
-                    merged[h] = merged.get(h, 0) | m
-                keys = sorted(merged)
-                masks.extend(map(merged.__getitem__, keys))
-            data.extend(keys)
-            buckets[i] = owners[i] = None
-        index.append(len(data))
+    mask_type = _mask_type(len(paths))
+    if not parts:
+        return b"", array("Q", [0] * (_BUCKETS + 1)).tobytes(), 0, [], mask_type, b""
+    data, index, masks = _merge(parts, mask_type)
     return data.tobytes(), index.tobytes(), len(data), per_file, mask_type, masks.tobytes()
 
 
@@ -162,16 +230,29 @@ def _mask_type(n_lists):
     return "Q"
 
 
+BUILD_WORKERS = 2   # muuttuneet listat jäsennetään rinnakkain; maltillinen määrä muistin takia
+
+
 def _build_isolated(paths, key):
-    """Rakentaa erillisessä prosessissa; jos se ei onnistu, tässä prosessissa."""
+    """Rakentaa erillisissä prosesseissa: ensin muuttuneet listat jäsennetään rinnakkain
+    välimuistiin, sitten yhdistetään. Jos prosessi kaatuu (esim. muisti loppuu), nostetaan
+    virhe eikä jäädä odottamaan ikuisesti. Jos erillistä prosessia ei voi käynnistää lainkaan,
+    rakennetaan tässä prosessissa."""
+    workers = max(1, min(len(paths), os.cpu_count() or 1, BUILD_WORKERS))
     try:
-        import multiprocessing
-        ctx = multiprocessing.get_context("spawn")
-        with ctx.Pool(1) as pool:
-            return pool.apply(build_domain_set, (paths, key))
+        ex = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+        cached = [ex.submit(_list_fingerprints, p, key, False) for p in paths]
     except Exception as e:  # noqa: BLE001
         log.warning("erillistä prosessia ei voitu käyttää (%s), rakennetaan pääprosessissa", e)
         return build_domain_set(paths, key)
+    with ex:
+        try:
+            for c in cached:
+                c.result()
+            return ex.submit(build_domain_set, paths, key).result()
+        except BrokenProcessPool:
+            raise RuntimeError("listojen käsittely keskeytyi, koska erillinen prosessi pysähtyi "
+                               "(loppuiko muisti?)") from None
 
 
 def normalize_domain(raw):
@@ -214,7 +295,12 @@ class Filter:
         os.makedirs(self.lists_dir, exist_ok=True)
         self._lock = threading.RLock()
         self._rebuild_lock = threading.Lock()
+        self._update_lock = threading.Lock()
+        self._active_lock = threading.Lock()
+        self._active = 0          # käynnissä tai jonossa olevat päivitykset
         self.rebuilding = False
+        self.build_error = None
+        self._built_sig = None    # listat, joista nykyinen joukko rakennettiin
         self.blocked = DomainSet()
         self.allow = set()        # sallitaan + kaikki aliverkkotunnukset
         self.deny = set()         # estetään + kaikki aliverkkotunnukset
@@ -222,6 +308,10 @@ class Filter:
         self.list_status = {}     # url -> {"count", "updated", "error"}
         self.last_update = None
         self.pause_until = None
+        self._key = self._load_key()
+        self._meta_path = os.path.join(self.lists_dir, "tila.json")
+        self._meta_lock = threading.Lock()
+        self._meta = self._load_meta()   # url -> {"etag", "modified", "sha256"}
         self._load_custom()
         # Listat ladataan taustalla (updater_loop), jotta DNS vastaa heti käynnistyksessä
 
@@ -342,51 +432,154 @@ class Filter:
     def _list_file(self, url):
         return os.path.join(self.lists_dir, hashlib.sha1(url.encode()).hexdigest()[:16] + ".txt")
 
-    def update_lists(self):
-        for entry in self.config["lists"]:
-            if not entry.get("enabled", True):
-                continue
-            url = entry["url"]
+    def _load_key(self):
+        """Tiivisteiden salainen avain. Luodaan kerran ja säilytetään, jotta listojen tiivisteet
+        voidaan tallentaa välimuistiin; ulkopuolinen ei silti voi ennustaa niitä."""
+        path = os.path.join(self.lists_dir, "avain")
+        try:
+            with open(path, "rb") as f:
+                key = f.read()
+            if len(key) == 16:
+                return key
+        except OSError:
+            pass
+        key = os.urandom(16)
+        fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+        os.replace(path + ".tmp", path)
+        return key
+
+    def _load_meta(self):
+        try:
+            with open(self._meta_path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_meta(self):
+        tmp = self._meta_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._meta, f, indent=2)
+        os.replace(tmp, self._meta_path)
+
+    @property
+    def updating(self):
+        """Listoja ladataan tai estojoukkoa rakennetaan (tai päivitys odottaa vuoroaan)."""
+        return self._active > 0 or self.rebuilding
+
+    def _download(self, url):
+        """Lataa listan suoraan levylle. Jos palvelin kertoo, ettei lista ole muuttunut (ETag /
+        Last-Modified), tai sisältö on täsmälleen sama kuin ennen, vanha tiedosto jää paikalleen
+        eikä estojoukkoa tarvitse rakentaa uudelleen. Palauttaa True, jos tiedosto vaihtui."""
+        dest = self._list_file(url)
+        tmp = dest + ".tmp"
+        st = self.list_status.setdefault(url, {"updated": None, "error": None})
+        meta = self._meta.get(url, {}) if os.path.exists(dest) else {}
+        headers = {"User-Agent": "sihti/1.0"}
+        if meta.get("etag"):
+            headers["If-None-Match"] = meta["etag"]
+        if meta.get("modified"):
+            headers["If-Modified-Since"] = meta["modified"]
+        try:
+            digest = hashlib.sha256()
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "sihti/1.0"})
-                dest = self._list_file(url)
-                # Suoraan levylle paloina: suurikaan lista ei vie muistia
-                with urllib.request.urlopen(req, timeout=60) as r, open(dest + ".tmp", "wb") as f:
-                    shutil.copyfileobj(r, f, 1 << 16)
-                os.replace(dest + ".tmp", dest)
-                self.list_status[url] = {"updated": time.time(), "error": None}
-                log.info("ladattu %s", url)
-            except Exception as e:  # noqa: BLE001 — verkkovirheet kirjataan, vanha kopio jää käyttöön
-                self.list_status.setdefault(url, {})["error"] = str(e)
-                log.warning("lataus epäonnistui %s: %s", url, e)
-        self.rebuild()
-        self.last_update = time.time()
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+                    while True:   # paloina: suurikaan lista ei vie muistia
+                        chunk = r.read(1 << 16)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        f.write(chunk)
+                    new = {"etag": r.headers.get("ETag"), "modified": r.headers.get("Last-Modified"),
+                           "sha256": digest.hexdigest()}
+            except urllib.error.HTTPError as e:
+                if e.code != 304:
+                    raise
+                e.close()
+                changed = False
+            else:
+                changed = new["sha256"] != meta.get("sha256")
+                if changed:
+                    os.replace(tmp, dest)
+                with self._meta_lock:
+                    self._meta[url] = {k: v for k, v in new.items() if v}
+                    self._save_meta()
+            st.update(updated=time.time(), error=None)
+            log.info("%s %s", "ladattu" if changed else "ei muutoksia", url)
+            return changed
+        except Exception as e:  # noqa: BLE001 — verkkovirheet kirjataan, vanha kopio jää käyttöön
+            st["error"] = str(e)
+            log.warning("lataus epäonnistui %s: %s", url, e)
+            return False
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+    def update_lists(self, missing_only=False):
+        """Lataa käytössä olevat listat rinnakkain ja rakentaa estojoukon, jos jokin muuttui.
+        missing_only: vain listat, joita ei vielä ole levyllä (juuri lisätty tai käyttöön otettu)."""
+        with self._active_lock:
+            self._active += 1
+        try:
+            with self._update_lock:
+                urls = [e["url"] for e in self.config["lists"] if e.get("enabled", True)]
+                if missing_only:
+                    urls = [u for u in urls if not os.path.exists(self._list_file(u))]
+                if urls:
+                    with ThreadPoolExecutor(max_workers=min(4, len(urls)), thread_name_prefix="lataus") as ex:
+                        list(ex.map(self._download, urls))
+                self.rebuild()
+                if not missing_only:
+                    self.last_update = time.time()
+        finally:
+            with self._active_lock:
+                self._active -= 1
+
+    def update_async(self, missing_only=False):
+        with self._active_lock:
+            self._active += 1   # näkyy käyttöliittymälle heti, vaikka edellinen päivitys olisi kesken
+
+        def run():
+            try:
+                self.update_lists(missing_only)
+            finally:
+                with self._active_lock:
+                    self._active -= 1
+        threading.Thread(target=run, daemon=True, name="listat-päivitys").start()
 
     def rebuild(self):
-        """Rakentaa estojoukon listatiedostoista. Vanha joukko on käytössä, kunnes uusi on valmis."""
+        """Rakentaa estojoukon listatiedostoista, jos käytössä olevat listat tai niiden sisältö
+        ovat muuttuneet. Muuttumattomien listojen tiivisteet luetaan välimuistista. Vanha joukko
+        on käytössä, kunnes uusi on valmis. Palauttaa True, jos joukko rakennettiin."""
         with self._rebuild_lock:
+            entries, paths, urls, sig = [], [], [], []
+            for entry in list(self.config["lists"]):
+                url = entry["url"]
+                path = self._list_file(url)
+                st = self.list_status.setdefault(url, {"updated": None, "error": None})
+                if not entry.get("enabled", True) or not os.path.exists(path):
+                    st["count"] = 0
+                    continue
+                fs = os.stat(path)
+                entries.append(st)
+                paths.append(path)
+                urls.append(url)
+                sig.append((url, fs.st_size, fs.st_mtime_ns))
+                if st.get("updated") is None:
+                    st["updated"] = fs.st_mtime
+                # Uudelleenkäynnistyksen jälkeen päivitysaika luetaan tallennetuista tiedostoista
+                if self.last_update is None or st["updated"] > self.last_update:
+                    self.last_update = st["updated"]
+            sig = tuple(sig)
+            if sig == self._built_sig:
+                return False
             self.rebuilding = True
+            t0 = time.monotonic()
             try:
-                t0 = time.monotonic()
-                entries, paths, urls = [], [], []
-                for entry in list(self.config["lists"]):
-                    url = entry["url"]
-                    path = self._list_file(url)
-                    st = self.list_status.setdefault(url, {"updated": None, "error": None})
-                    if not entry.get("enabled", True) or not os.path.exists(path):
-                        st["count"] = 0
-                        continue
-                    entries.append(st)
-                    paths.append(path)
-                    urls.append(url)
-                    if st.get("updated") is None:
-                        st["updated"] = os.path.getmtime(path)
-                    # Uudelleenkäynnistyksen jälkeen päivitysaika luetaan tallennetuista tiedostoista
-                    if self.last_update is None or st["updated"] > self.last_update:
-                        self.last_update = st["updated"]
-                key = os.urandom(16)   # uusi avain joka rakennukselle: tiivisteitä ei voi ennustaa
                 if paths:
-                    data_b, index_b, count, per_file, mask_type, masks_b = _build_isolated(paths, key)
+                    data_b, index_b, count, per_file, mask_type, masks_b = _build_isolated(paths, self._key)
                     data, index, masks = array("Q"), array("Q"), array(mask_type)
                     data.frombytes(data_b)
                     index.frombytes(index_b)
@@ -394,21 +587,37 @@ class Filter:
                     del data_b, index_b, masks_b
                     for st, n in zip(entries, per_file):
                         st["count"] = n
-                    blocked = DomainSet(key, data, index, count, masks, tuple(urls))
+                    blocked = DomainSet(self._key, data, index, count, masks, tuple(urls))
                 else:
                     blocked = DomainSet()
-                with self._lock:
-                    self.blocked = blocked
-                log.info("estettäviä verkkotunnuksia: %d (%.1f s)", len(blocked), time.monotonic() - t0)
+            except Exception as e:  # noqa: BLE001 — vanha joukko jää käyttöön
+                self.build_error = str(e)
+                log.error("estolistojen käsittely epäonnistui: %s", e)
+                return False
             finally:
                 self.rebuilding = False
+            with self._lock:
+                self.blocked = blocked
+            self._built_sig = sig
+            self.build_error = None
+            self._remove_stale_files()
+            log.info("estettäviä verkkotunnuksia: %d (%.1f s)", len(blocked), time.monotonic() - t0)
+            return True
 
-    def rebuild_async(self):
-        threading.Thread(target=self.rebuild, daemon=True, name="listat-rakennus").start()
+    def _remove_stale_files(self):
+        """Poistaa poistettujen listojen tiedostot ja niiden välimuistit."""
+        keep = {os.path.splitext(os.path.basename(self._list_file(e["url"])))[0] for e in self.config["lists"]}
+        for fn in os.listdir(self.lists_dir):
+            base, ext = os.path.splitext(fn)
+            if ext in (".txt", ".fp") and re.fullmatch(r"[0-9a-f]{16}", base) and base not in keep:
+                try:
+                    os.remove(os.path.join(self.lists_dir, fn))
+                except OSError:
+                    pass
 
     def updater_loop(self, stop_event):
-        self.rebuild()                 # tallennetut listat ensin
-        if not self.blocked:
-            self.update_lists()        # ensimmäinen käynnistys: ladataan
+        # Tallennetut listat ensin (välimuistista nopeasti); puuttuvat, esim. ensimmäisellä
+        # käynnistyksellä kaikki, ladataan heti
+        self.update_lists(missing_only=True)
         while not stop_event.wait(max(1, self.config["update_interval_hours"]) * 3600):
             self.update_lists()

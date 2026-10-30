@@ -56,7 +56,6 @@ class App:
         self.qlog = qlog
         self.resolver = resolver
         self.sessions = {}
-        self._updating = threading.Lock()
 
     # ---------- istunnot ----------
     def auth_required(self):
@@ -89,6 +88,8 @@ class App:
                 "custom_regex": len(f.deny_regex),
                 "custom_allow": len(f.allow),
                 "lists_loading": f.rebuilding,
+                "lists_updating": f.updating,
+                "build_error": f.build_error,
                 "cache_entries": len(self.resolver.cache),
                 "last_update": f.last_update,
                 "uptime": time.time() - self.qlog.started,
@@ -157,18 +158,11 @@ class App:
                 lists = [l for l in lists if l["url"] != body["url"]]
             if method != "GET":
                 self.config.update(lists=lists)
-                f.rebuild_async()
+                f.update_async(missing_only=True)   # uusi tai käyttöön otettu lista ladataan heti
             return [{**l, **f.list_status.get(l["url"], {})} for l in self.config["lists"]]
 
         if path == "/api/lists/update" and method == "POST":
-            if self._updating.locked():
-                return {"ok": True, "running": True}
-
-            def run():
-                with self._updating:
-                    f.update_lists()
-                    self.resolver.cache.clear()
-            threading.Thread(target=run, daemon=True).start()
+            f.update_async()
             return {"ok": True, "running": True}
 
         if path == "/api/settings":

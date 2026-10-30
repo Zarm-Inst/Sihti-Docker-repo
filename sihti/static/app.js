@@ -78,8 +78,8 @@ async function boot() {
   $("#logout").hidden = !s.auth_required;
   $("#login").hidden = true;
   $("#app").hidden = false;
+  await refreshStatus();   // tila ensin, jotta näkymä tietää esim. käynnissä olevasta listapäivityksestä
   route();
-  refreshStatus();
   setInterval(refreshStatus, 10000);
 }
 $("#login-form").addEventListener("submit", async (e) => {
@@ -118,6 +118,7 @@ async function refreshStatus() {
   btn.textContent = status.blocking ? "Poista käytöstä" : "Ota käyttöön";
   $("#pause").hidden = !status.blocking;
   if (current === "yleiskuva") { renderHeadline(); renderKpis(); }
+  if (current === "listat" && status.lists_updating) waitForLists();
 }
 $("#toggle").addEventListener("click", async () => {
   await api("/api/blocking", { method: "POST", body: { enabled: !status.blocking } });
@@ -153,12 +154,13 @@ function renderKpis() {
   $("#k-pass-sub").textContent = plural(s.passed_domains, "eri verkkotunnus", "eri verkkotunnusta");
   $("#k-block-sub").textContent = plural(s.blocked_domains, "eri verkkotunnus", "eri verkkotunnusta");
 
-  const loading = s.lists_loading && !s.domains_on_lists;
+  const loading = s.lists_updating && !s.domains_on_lists;
   $("#k-lists").textContent = loading ? "ladataan…" : fmt.format(s.domains_on_lists);
   const extra = [plural(s.lists_enabled, "lista", "listaa") + " käytössä"];
   if (s.custom_deny) extra.push(plural(s.custom_deny, "oma esto", "omaa estoa"));
   if (s.custom_regex) extra.push(plural(s.custom_regex, "lauseke", "lauseketta"));
-  if (s.lists_loading && s.domains_on_lists) extra.push("päivitetään…");
+  if (s.lists_updating && s.domains_on_lists) extra.push("päivitetään…");
+  else if (s.build_error) extra.push("viimeisin päivitys epäonnistui");
   $("#k-lists-sub").textContent = extra.join(" · ");
 
   // Ohut jakopalkki: läpäisseiden ja estettyjen osuus
@@ -330,37 +332,56 @@ $("#check-form").addEventListener("submit", async (e) => {
 async function loadLists(data) {
   const lists = data || await api("/api/lists");
   const total = lists.filter((l) => l.enabled).reduce((s, l) => s + (l.count || 0), 0);
-  $("#list-summary").textContent = `${lists.length} listaa, käytössä olevissa yhteensä ${fmt.format(total)} riviä (päällekkäiset lasketaan kerran suodatuksessa).`;
+  let summary = `${lists.length} listaa, käytössä olevissa yhteensä ${fmt.format(total)} riviä (päällekkäiset lasketaan kerran suodatuksessa).`;
+  if (status?.lists_updating) summary += " Listoja päivitetään…";
+  else if (status?.build_error) summary += ` Viimeisin päivitys epäonnistui: ${status.build_error}`;
+  $("#list-summary").textContent = summary;
+  if (status?.lists_updating) waitForLists();
   $("#lists").replaceChildren(...lists.map((l) => {
     const cb = el("input", { type: "checkbox", "aria-label": "Käytössä" });
     cb.checked = l.enabled;
-    cb.addEventListener("change", async () => loadLists(await api("/api/lists", { method: "PATCH", body: { url: l.url, enabled: cb.checked } })));
+    cb.addEventListener("change", async () => listsChanged(await api("/api/lists", { method: "PATCH", body: { url: l.url, enabled: cb.checked } })));
     const meta = el("div", { class: "meta" }, `${fmt.format(l.count || 0)} nimeä · päivitetty ${dateFmt(l.updated)}`);
     if (l.error) meta.append(" · ", el("span", { class: "err", text: "viimeisin lataus epäonnistui: " + l.error }));
     return el("li", { class: l.enabled ? "" : "off" }, cb, el("div", { class: "url", text: l.url }),
       el("button", { class: "linkbtn", text: "Poista", onclick: async () => {
-        if (confirm("Poistetaanko lista?")) loadLists(await api("/api/lists", { method: "DELETE", body: { url: l.url } }));
+        if (confirm("Poistetaanko lista?")) listsChanged(await api("/api/lists", { method: "DELETE", body: { url: l.url } }));
       } }), meta);
   }));
 }
 $("#list-add").addEventListener("submit", async (e) => {
   e.preventDefault();
-  try { loadLists(await api("/api/lists", { method: "POST", body: { url: $("#list-url").value } })); $("#list-url").value = ""; }
+  try { listsChanged(await api("/api/lists", { method: "POST", body: { url: $("#list-url").value } })); $("#list-url").value = ""; }
   catch (err) { alert(err.message); }
 });
-$("#list-update").addEventListener("click", async (e) => {
-  const b = e.target;
-  b.disabled = true; b.textContent = "Päivitetään…";
+$("#list-update").addEventListener("click", async () => {
   await api("/api/lists/update", { method: "POST" });
-  const before = status?.last_update;
-  for (let i = 0; i < 60; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
-    await refreshStatus();
-    if (status?.last_update !== before) break;
-  }
-  b.disabled = false; b.textContent = "Päivitä listat nyt";
-  loadLists();
+  listsChanged();
 });
+
+// Listojen lataus ja käsittely jatkuvat taustalla: lukuja päivitetään, kunnes työ on valmis.
+async function listsChanged(data) {
+  await refreshStatus();
+  loadLists(data);
+}
+let listWait = null;
+function waitForLists() {
+  if (listWait) return listWait;
+  const b = $("#list-update");
+  b.disabled = true; b.textContent = "Päivitetään…";
+  listWait = (async () => {
+    while (status?.lists_updating) {
+      await new Promise((r) => setTimeout(r, 1500));
+      await refreshStatus();
+    }
+  })().finally(() => {
+    listWait = null;
+    b.disabled = false; b.textContent = "Päivitä listat nyt";
+    if (current === "listat") loadLists();
+  });
+  if (current === "listat") loadLists();   // näyttää "päivitetään" heti
+  return listWait;
+}
 
 /* ---------- asetukset ---------- */
 async function loadSettings() {
