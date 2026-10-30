@@ -3,8 +3,38 @@
 
 const $ = (s) => document.querySelector(s);
 const fmt = new Intl.NumberFormat("fi-FI");
+const pctFmt = new Intl.NumberFormat("fi-FI", { style: "percent", maximumFractionDigits: 1 });
 const STATUS_LABEL = { estetty: "Estetty", sallittu: "Sallittu", valimuisti: "Välimuisti", virhe: "Virhe" };
-const REASON_LABEL = { lista: "estolista", oma: "oma esto", lauseke: "lauseke", "ylävirta": "ylävirta ei vastannut" };
+const REASON_LABEL = { lista: "Estolista", oma: "Oma esto", lauseke: "Lauseke", sallinta: "Oma sallinta", "ylävirta": "Ylävirta ei vastannut" };
+
+// Lyhyt nimi listan osoitteesta: raw.githubusercontent.com/StevenBlack/hosts/master/hosts -> StevenBlack/hosts
+function listName(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const file = parts.at(-1) || "";
+    if (/^(raw\.githubusercontent|github)\.com$/.test(u.hostname) && parts.length >= 2) {
+      return `${parts[0]}/${parts[1]}` + (file && file !== parts[1] ? `/${file}` : "");
+    }
+    if (!u.hostname) return file || url;
+    return u.hostname + (file ? `/${file}` : "");
+  } catch { return url; }
+}
+
+// Eston (tai sallinnan) syy luettavana: "Estolista: StevenBlack/hosts", "Oma esto: example.com"
+function reasonText(reason, detail) {
+  if (!reason) return "";
+  const label = REASON_LABEL[reason] || reason;
+  if (!detail) return label;
+  return `${label}: ${reason === "lista" ? detail.split(" ").map(listName).join(", ") : detail}`;
+}
+const reasonTitle = (reason, detail) => reason === "lista" && detail ? detail.split(" ").join("\n") : (detail || "");
+
+const plural = (n, one, many) => `${fmt.format(n)}\u00a0${n === 1 ? one : many}`;  // luku ja sana samalle riville
+function durationFmt(sec) {
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  return d ? `${d} pv ${h} t` : h ? `${h} t ${m} min` : `${m} min`;
+}
 
 async function api(path, opts = {}) {
   const init = { method: opts.method || "GET", headers: { "X-Sihti": "1" } };
@@ -87,7 +117,7 @@ async function refreshStatus() {
   else txt.textContent = "Suodatus pois";
   btn.textContent = status.blocking ? "Poista käytöstä" : "Ota käyttöön";
   $("#pause").hidden = !status.blocking;
-  if (current === "yleiskuva") renderHeadline();
+  if (current === "yleiskuva") { renderHeadline(); renderKpis(); }
 }
 $("#toggle").addEventListener("click", async () => {
   await api("/api/blocking", { method: "POST", body: { enabled: !status.blocking } });
@@ -109,28 +139,69 @@ function renderHeadline() {
   const pct = Math.round((status.blocked / status.total) * 1000) / 10;
   p.append("Viimeisen vuorokauden aikana ", el("b", { text: fmt.format(status.total) }), " kyselyä, joista ",
     el("b", { class: "caught", text: `${fmt.format(status.blocked)} (${String(pct).replace(".", ",")} %)` }), " jäi sihtiin.");
+}
+
+function renderKpis() {
+  const s = status;
+  const decided = s.passed + s.blocked;
+  $("#k-total").textContent = fmt.format(s.total);
+  $("#k-total-sub").textContent = plural(s.clients, "laite", "laitetta");
+  $("#k-pass").textContent = fmt.format(s.passed);
+  $("#k-block").textContent = fmt.format(s.blocked);
+  $("#k-pass-pct").textContent = decided ? pctFmt.format(s.passed / decided) : "";
+  $("#k-block-pct").textContent = decided ? pctFmt.format(s.blocked / decided) : "";
+  $("#k-pass-sub").textContent = plural(s.passed_domains, "eri verkkotunnus", "eri verkkotunnusta");
+  $("#k-block-sub").textContent = plural(s.blocked_domains, "eri verkkotunnus", "eri verkkotunnusta");
+
+  const loading = s.lists_loading && !s.domains_on_lists;
+  $("#k-lists").textContent = loading ? "ladataan…" : fmt.format(s.domains_on_lists);
+  const extra = [plural(s.lists_enabled, "lista", "listaa") + " käytössä"];
+  if (s.custom_deny) extra.push(plural(s.custom_deny, "oma esto", "omaa estoa"));
+  if (s.custom_regex) extra.push(plural(s.custom_regex, "lauseke", "lauseketta"));
+  if (s.lists_loading && s.domains_on_lists) extra.push("päivitetään…");
+  $("#k-lists-sub").textContent = extra.join(" · ");
+
+  // Ohut jakopalkki: läpäisseiden ja estettyjen osuus
+  const split = $("#split");
+  split.hidden = !decided;
+  if (decided) {
+    const [ok, no] = split.children;
+    ok.style.flexGrow = s.passed; ok.hidden = !s.passed;
+    no.style.flexGrow = s.blocked; no.hidden = !s.blocked;
+    ok.title = `Läpäisi ${fmt.format(s.passed)} (${pctFmt.format(s.passed / decided)})`;
+    no.title = `Jäi sihtiin ${fmt.format(s.blocked)} (${pctFmt.format(s.blocked / decided)})`;
+    split.setAttribute("aria-label", `${ok.title}, ${no.title.charAt(0).toLowerCase() + no.title.slice(1)}`);
+  }
+
   const facts = [
-    [status.lists_loading && !status.domains_on_lists ? "ladataan…" : fmt.format(status.domains_on_lists),
-     status.lists_loading && status.domains_on_lists ? "nimeä estolistoilla (päivitetään…)" : "nimeä estolistoilla"],
-    [fmt.format(status.clients), "laitetta käytti palvelua"],
-    [fmt.format(status.cached), "vastausta välimuistista"],
-    [dateFmt(status.last_update), "listat päivitetty"],
+    [fmt.format(s.cached), "vastausta välimuistista"],
+    [fmt.format(s.errors), "kyselyä epäonnistui"],
+    [dateFmt(s.last_update), "listat päivitetty"],
+    [durationFmt(s.uptime), "käynnissä"],
   ];
   $("#facts").replaceChildren(...facts.map(([v, k]) => el("div", {}, el("dt", { text: k }), el("dd", { text: v }))));
 }
 
+// Yleiskuvan linkit avaavat kyselylokin valmiiksi suodatettuna
+function presetLog(status = "", search = "") {
+  $("#log-status").value = status;
+  $("#log-search").value = search;
+}
+document.querySelectorAll(".kpi[data-status]").forEach((a) => a.addEventListener("click", () => presetLog(a.dataset.status)));
+
 async function loadOverview() {
-  renderHeadline();
+  if (status) { renderHeadline(); renderKpis(); }
   const [tl, top] = await Promise.all([api("/api/timeline?hours=24"), api("/api/top?hours=24")]);
   drawChart(tl);
-  for (const [id, rows] of [["top-blocked", top.blocked], ["top-domains", top.domains], ["top-clients", top.clients]]) {
+  for (const [id, rows, logStatus] of [["top-blocked", top.blocked, "estetty"], ["top-domains", top.domains, "sallittu"], ["top-clients", top.clients, ""]]) {
     const ol = $("#" + id);
     if (!rows.length) { ol.replaceChildren(el("li", { class: "empty", text: "Ei vielä tietoja." })); continue; }
     const max = rows[0].count;
     ol.replaceChildren(...rows.map((r) => {
       const bar = el("span", { class: "bar" });
       bar.style.width = (r.count / max) * 100 + "%";
-      return el("li", { title: r.name }, bar, el("span", { class: "name", text: r.name }), el("span", { class: "n", text: fmt.format(r.count) }));
+      const name = el("a", { class: "name", href: "#loki", text: r.name, onclick: () => presetLog(logStatus, r.name) });
+      return el("li", { title: r.name }, bar, name, el("span", { class: "n", text: fmt.format(r.count) }));
     }));
   }
 }
@@ -191,16 +262,17 @@ async function renderLog() {
   if ($("#log-status").value) q.set("status", $("#log-status").value);
   const rows = await api("/api/log?" + q);
   const body = $("#log-body");
-  if (!rows.length) { body.replaceChildren(el("tr", {}, el("td", { colspan: 7, class: "empty", text: "Ei kyselyjä näillä ehdoilla." }))); return; }
+  if (!rows.length) { body.replaceChildren(el("tr", {}, el("td", { colspan: 8, class: "empty", text: "Ei kyselyjä näillä ehdoilla." }))); return; }
   body.replaceChildren(...rows.map((r) => {
     const tag = el("span", { class: "tag " + r.status, text: STATUS_LABEL[r.status] || r.status });
-    if (r.reason) tag.title = REASON_LABEL[r.reason] || r.reason;
+    const why = el("td", { class: "why", text: reasonText(r.reason, r.detail) });
+    if (r.detail) why.title = reasonTitle(r.reason, r.detail);
     const action = r.status === "estetty"
       ? el("button", { class: "linkbtn", text: "Salli", onclick: () => quickRule("allow", r.domain) })
       : el("button", { class: "linkbtn", text: "Estä", onclick: () => quickRule("deny", r.domain) });
     return el("tr", { class: r.status },
       el("td", { text: timeFmt(r.ts) }), el("td", { text: r.client }), el("td", { class: "dom", text: r.domain }),
-      el("td", { text: r.qtype }), el("td", {}, tag), el("td", { class: "r", text: r.ms ?? "" }), el("td", {}, action));
+      el("td", { text: r.qtype }), el("td", {}, tag), why, el("td", { class: "r", text: r.ms ?? "" }), el("td", {}, action));
   }));
 }
 async function quickRule(kind, domain) {
@@ -250,7 +322,8 @@ $("#check-form").addEventListener("submit", async (e) => {
   try { r = await api("/api/check?domain=" + encodeURIComponent($("#check-domain").value)); }
   catch (err) { out.className = "no"; out.textContent = err.message; return; }
   out.className = r.blocked ? "no" : "ok";
-  out.textContent = r.blocked ? `${r.domain} estetään (${REASON_LABEL[r.reason] || r.reason}).` : `${r.domain} päästetään läpi.`;
+  const why = r.reason ? ` – ${reasonText(r.reason, r.detail)}` : "";
+  out.textContent = r.blocked ? `${r.domain} estetään${why}.` : `${r.domain} päästetään läpi${why}.`;
 });
 
 /* ---------- estolistat ---------- */

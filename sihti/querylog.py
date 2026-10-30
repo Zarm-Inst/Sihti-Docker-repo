@@ -12,8 +12,9 @@ CREATE TABLE IF NOT EXISTS kyselyt (
     domain TEXT NOT NULL,
     qtype TEXT NOT NULL,
     status TEXT NOT NULL,      -- sallittu | estetty | valimuisti | virhe
-    reason TEXT,
-    ms REAL
+    reason TEXT,               -- lista | oma | lauseke | sallinta | ylävirta
+    ms REAL,
+    detail TEXT                -- listojen osoitteet, osunut sääntö tai lauseke
 );
 CREATE INDEX IF NOT EXISTS i_ts ON kyselyt(ts);
 """
@@ -27,6 +28,9 @@ class QueryLog:
         self._read_lock = threading.Lock()
         db = self._connect()
         db.executescript(SCHEMA)
+        if "detail" not in {r[1] for r in db.execute("PRAGMA table_info(kyselyt)")}:
+            db.execute("ALTER TABLE kyselyt ADD COLUMN detail TEXT")  # vanhempi tietokanta
+            db.commit()
         db.close()
         # Laskurit muistissa, jotta etusivu on nopea myös ilman lokia
         self.started = time.time()
@@ -37,11 +41,11 @@ class QueryLog:
         db.execute("PRAGMA synchronous=NORMAL")
         return db
 
-    def add(self, client, domain, qtype, status, reason=None, ms=None):
+    def add(self, client, domain, qtype, status, reason=None, ms=None, detail=None):
         if not self.config["log_queries"]:
             return
         try:
-            self._q.put_nowait((time.time(), client, domain, qtype, status, reason, ms))
+            self._q.put_nowait((time.time(), client, domain, qtype, status, reason, ms, detail))
         except queue.Full:
             pass  # ylikuormassa lokirivit pudotetaan, DNS jatkaa toimintaa
 
@@ -57,7 +61,8 @@ class QueryLog:
             except queue.Empty:
                 pass
             if batch:
-                db.executemany("INSERT INTO kyselyt VALUES (?,?,?,?,?,?,?)", batch)
+                db.executemany("INSERT INTO kyselyt (ts, client, domain, qtype, status, reason, ms, detail) "
+                               "VALUES (?,?,?,?,?,?,?,?)", batch)
                 db.commit()
             if time.time() - last_purge > 3600:
                 cutoff = time.time() - self.config["log_retention_days"] * 86400
@@ -74,12 +79,18 @@ class QueryLog:
             return self._rdb.execute(sql, args).fetchall()
 
     def summary(self, hours=24):
+        """Etusivun luvut yhdellä läpikäynnillä. Läpäisseet = sallitut + välimuistista."""
         since = time.time() - hours * 3600
-        total, blocked, cached = self._rows(
-            "SELECT COUNT(*), SUM(status='estetty'), SUM(status='valimuisti') FROM kyselyt WHERE ts>=?",
-            (since,))[0]
-        clients = self._rows("SELECT COUNT(DISTINCT client) FROM kyselyt WHERE ts>=?", (since,))[0][0]
-        return {"total": total or 0, "blocked": blocked or 0, "cached": cached or 0, "clients": clients or 0}
+        row = self._rows(
+            "SELECT COUNT(*), SUM(status='estetty'), SUM(status='valimuisti'), SUM(status='virhe'), "
+            "COUNT(DISTINCT client), "
+            "COUNT(DISTINCT CASE WHEN status='estetty' THEN domain END), "
+            "COUNT(DISTINCT CASE WHEN status IN ('sallittu','valimuisti') THEN domain END) "
+            "FROM kyselyt WHERE ts>=?", (since,))[0]
+        total, blocked, cached, errors, clients, blocked_domains, passed_domains = (v or 0 for v in row)
+        return {"total": total, "blocked": blocked, "passed": total - blocked - errors, "cached": cached,
+                "errors": errors, "clients": clients,
+                "blocked_domains": blocked_domains, "passed_domains": passed_domains}
 
     def timeline(self, hours=24, bucket=600):
         since = time.time() - hours * 3600
@@ -107,17 +118,19 @@ class QueryLog:
         return [{"name": n, "count": c} for n, c in self._rows(sql, args)]
 
     def recent(self, limit=200, search=None, status=None):
-        sql = "SELECT ts, client, domain, qtype, status, reason, ms FROM kyselyt WHERE 1=1"
+        sql = "SELECT ts, client, domain, qtype, status, reason, ms, detail FROM kyselyt WHERE 1=1"
         args = []
         if search:
             sql += " AND (domain LIKE ? OR client LIKE ?)"
             args += [f"%{search}%", f"%{search}%"]
-        if status:
+        if status == "lapaisi":   # läpäisseet: sallitut ja välimuistista vastatut
+            sql += " AND status IN ('sallittu','valimuisti')"
+        elif status:
             sql += " AND status=?"
             args.append(status)
         sql += " ORDER BY ts DESC LIMIT ?"
         args.append(min(int(limit), 2000))
-        keys = ("ts", "client", "domain", "qtype", "status", "reason", "ms")
+        keys = ("ts", "client", "domain", "qtype", "status", "reason", "ms", "detail")
         return [dict(zip(keys, r)) for r in self._rows(sql, args)]
 
     def clear(self):

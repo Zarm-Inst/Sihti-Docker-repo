@@ -67,23 +67,40 @@ class DomainSet:
     """Tiivis joukko estettäviä nimiä: jokaisesta nimestä tallennetaan vain 64-bittinen
     avaimellinen tiiviste (8 tavua) yhteen lajiteltuun taulukkoon, jonka hakemisto jakaa
     sen 65 536 lohkoon. Viisi miljoonaa nimeä vie noin 45 Mt, kun tavallisena Python-
-    joukkona ne veisivät lähes gigatavun. Väärän osuman todennäköisyys on käytännössä nolla."""
+    joukkona ne veisivät lähes gigatavun. Väärän osuman todennäköisyys on käytännössä nolla.
+    Rinnakkainen bittimaski kertoo, millä listoilla nimi on (1 tavu per nimi, kun listoja
+    on enintään 8), jotta kyselylokiin saadaan eston syy."""
     SHIFT = 48
 
-    def __init__(self, key=b"", data=None, index=None, count=0):
+    def __init__(self, key=b"", data=None, index=None, count=0, masks=None, sources=()):
         self.key = key
         self._data = data
         self._index = index
         self._count = count
+        self._masks = masks       # bitti n = nimi on listalla sources[n]
+        self.sources = sources    # listojen osoitteet bittien järjestyksessä
 
-    def __contains__(self, name):
+    def _find(self, name):
         if not self._count:
-            return False
+            return -1
         h = fingerprint(name, self.key)
         b = h >> self.SHIFT
         lo, hi = self._index[b], self._index[b + 1]
         i = bisect_left(self._data, h, lo, hi)
-        return i < hi and self._data[i] == h
+        return i if i < hi and self._data[i] == h else -1
+
+    def __contains__(self, name):
+        return self._find(name) >= 0
+
+    def lookup(self, name):
+        """None, jos nimeä ei ole; muuten niiden listojen osoitteet, joilla nimi on."""
+        i = self._find(name)
+        if i < 0:
+            return None
+        if self._masks is None:
+            return []
+        m = self._masks[i]
+        return [url for n, url in enumerate(self.sources) if m >> n & 1]
 
     def __len__(self):
         return self._count
@@ -99,26 +116,50 @@ def fingerprint(name, key):
 def build_domain_set(paths, key):
     """Lukee listatiedostot ja rakentaa DomainSetin raakadatan. Ajetaan omassa prosessissaan,
     jotta raskas jäsennys ei hidasta DNS-vastauksia (Pythonin GIL). Palauttaa
-    (data_bytes, index_bytes, nimiä_yhteensä, [rivejä_per_tiedosto])."""
-    buckets = [array("Q") for _ in range(1 << (64 - DomainSet.SHIFT))]
+    (data_bytes, index_bytes, nimiä_yhteensä, [rivejä_per_tiedosto], maskin_tyyppi, maskit_bytes)."""
+    nb = 1 << (64 - DomainSet.SHIFT)
+    buckets = [array("Q") for _ in range(nb)]
+    mask_type = _mask_type(len(paths))
+    owners = [array(mask_type) for _ in range(nb)]   # rinnakkain: minkä listan bitti
     shift = DomainSet.SHIFT
     per_file = []
-    for path in paths:
+    for n_file, path in enumerate(paths):
+        bit = 1 << n_file if n_file < 64 else 0   # yli 64 listaa: syy jää ilman listan nimeä
         n = 0
         with open(path, encoding="utf-8", errors="replace") as f:
             for name in iter_domains(f):
                 h = fingerprint(name, key)
-                buckets[h >> shift].append(h)
+                b = h >> shift
+                buckets[b].append(h)
+                owners[b].append(bit)
                 n += 1
         per_file.append(n)
     data = array("Q")
     index = array("Q", [0])
+    masks = array(mask_type)
     for i, a in enumerate(buckets):
         if a:
-            data.extend(sorted(set(a)))   # päällekkäiset pois, lajittelu hakua varten
-            buckets[i] = None
+            o = owners[i]
+            if o.count(o[0]) == len(o):   # kaikki samalta listalta: nopea tie
+                keys = sorted(set(a))     # päällekkäiset pois, lajittelu hakua varten
+                masks.extend(array(mask_type, [o[0]]) * len(keys))
+            else:
+                merged = {}
+                for h, m in zip(a, o):
+                    merged[h] = merged.get(h, 0) | m
+                keys = sorted(merged)
+                masks.extend(map(merged.__getitem__, keys))
+            data.extend(keys)
+            buckets[i] = owners[i] = None
         index.append(len(data))
-    return data.tobytes(), index.tobytes(), len(data), per_file
+    return data.tobytes(), index.tobytes(), len(data), per_file, mask_type, masks.tobytes()
+
+
+def _mask_type(n_lists):
+    for code in ("B", "H", "I", "Q"):
+        if n_lists <= array(code).itemsize * 8:
+            return code
+    return "Q"
 
 
 def _build_isolated(paths, key):
@@ -278,21 +319,24 @@ class Filter:
 
     # ---------- tarkistus ----------
     def check(self, name):
-        """Palauttaa (estetty: bool, syy: str|None)."""
+        """Palauttaa (estetty: bool, syy: str|None, tarkenne: str|None).
+        Syy: lista | oma | lauseke, tai sallinta (oma sallittu-sääntö ohitti suodatuksen).
+        Tarkenne: listojen osoitteet välilyönnein, osunut oma sääntö tai lauseke."""
         if not self.active:
-            return False, None
+            return False, None, None
         for p in _parents(name):
             if p in self.allow:
-                return False, None
-        if name in self.blocked:
-            return True, "lista"
+                return False, "sallinta", p
+        sources = self.blocked.lookup(name)
+        if sources is not None:
+            return True, "lista", " ".join(sources) or None
         for p in _parents(name):
             if p in self.deny:
-                return True, "oma"
-        for _, rx in self.deny_regex:
+                return True, "oma", p
+        for pattern, rx in self.deny_regex:
             if rx.search(name):
-                return True, "lauseke"
-        return False, None
+                return True, "lauseke", pattern
+        return False, None, None
 
     # ---------- listojen päivitys ----------
     def _list_file(self, url):
@@ -324,7 +368,7 @@ class Filter:
             self.rebuilding = True
             try:
                 t0 = time.monotonic()
-                entries, paths = [], []
+                entries, paths, urls = [], [], []
                 for entry in list(self.config["lists"]):
                     url = entry["url"]
                     path = self._list_file(url)
@@ -334,6 +378,7 @@ class Filter:
                         continue
                     entries.append(st)
                     paths.append(path)
+                    urls.append(url)
                     if st.get("updated") is None:
                         st["updated"] = os.path.getmtime(path)
                     # Uudelleenkäynnistyksen jälkeen päivitysaika luetaan tallennetuista tiedostoista
@@ -341,14 +386,15 @@ class Filter:
                         self.last_update = st["updated"]
                 key = os.urandom(16)   # uusi avain joka rakennukselle: tiivisteitä ei voi ennustaa
                 if paths:
-                    data_b, index_b, count, per_file = _build_isolated(paths, key)
-                    data, index = array("Q"), array("Q")
+                    data_b, index_b, count, per_file, mask_type, masks_b = _build_isolated(paths, key)
+                    data, index, masks = array("Q"), array("Q"), array(mask_type)
                     data.frombytes(data_b)
                     index.frombytes(index_b)
-                    del data_b, index_b
+                    masks.frombytes(masks_b)
+                    del data_b, index_b, masks_b
                     for st, n in zip(entries, per_file):
                         st["count"] = n
-                    blocked = DomainSet(key, data, index, count)
+                    blocked = DomainSet(key, data, index, count, masks, tuple(urls))
                 else:
                     blocked = DomainSet()
                 with self._lock:

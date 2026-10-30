@@ -48,6 +48,29 @@
     <!-- Yleiskuva -->
     <section id="v-yleiskuva" class="view">
       <p class="lead" id="headline">Ladataan…</p>
+      <div class="kpis" aria-label="Viimeisen vuorokauden luvut">
+        <a class="kpi" href="#loki" data-status="" title="Näytä kyselyloki">
+          <span class="kpi-label">Kyselyt 24 h</span>
+          <span class="kpi-value" id="k-total">–</span>
+          <span class="kpi-sub" id="k-total-sub"></span>
+        </a>
+        <a class="kpi" href="#loki" data-status="lapaisi" title="Näytä läpäisseet kyselyt">
+          <span class="kpi-label"><span class="k ok"></span>Läpäisi</span>
+          <span class="kpi-value"><span id="k-pass">–</span> <span class="pct" id="k-pass-pct"></span></span>
+          <span class="kpi-sub" id="k-pass-sub"></span>
+        </a>
+        <a class="kpi" href="#loki" data-status="estetty" title="Näytä estetyt kyselyt ja eston syyt">
+          <span class="kpi-label"><span class="k no"></span>Jäi sihtiin</span>
+          <span class="kpi-value"><span id="k-block">–</span> <span class="pct" id="k-block-pct"></span></span>
+          <span class="kpi-sub" id="k-block-sub"></span>
+        </a>
+        <a class="kpi" href="#listat" title="Näytä estolistat">
+          <span class="kpi-label">Nimiä estolistoilla</span>
+          <span class="kpi-value" id="k-lists">–</span>
+          <span class="kpi-sub" id="k-lists-sub"></span>
+        </a>
+      </div>
+      <div class="split" id="split" role="img" hidden><span class="ok"></span><span class="no"></span></div>
       <div class="sieve">
         <div class="legend"><span class="k ok"></span>Läpäisi <span class="k no"></span>Jäi sihtiin</div>
         <svg id="chart" role="img" aria-label="Kyselyt viimeisen vuorokauden aikana"></svg>
@@ -68,6 +91,7 @@
         <select id="log-status" aria-label="Tila">
           <option value="">Kaikki</option>
           <option value="estetty">Estetyt</option>
+          <option value="lapaisi">Läpäisseet</option>
           <option value="sallittu">Sallitut</option>
           <option value="valimuisti">Välimuistista</option>
           <option value="virhe">Virheet</option>
@@ -76,7 +100,7 @@
       </div>
       <div class="table-wrap">
         <table class="log">
-          <thead><tr><th>Aika</th><th>Laite</th><th>Verkkotunnus</th><th>Tyyppi</th><th>Tila</th><th class="r">ms</th><th></th></tr></thead>
+          <thead><tr><th>Aika</th><th>Laite</th><th>Verkkotunnus</th><th>Tyyppi</th><th>Tila</th><th>Syy</th><th class="r">ms</th><th></th></tr></thead>
           <tbody id="log-body"></tbody>
         </table>
       </div>

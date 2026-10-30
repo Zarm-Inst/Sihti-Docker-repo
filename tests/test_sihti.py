@@ -127,15 +127,27 @@ class TestDomainSet(unittest.TestCase):
             f.write("".join(f"||{n}^\n" for n in names[10000:]))
         key = os.urandom(16)
         for builder in (build_domain_set, _build_isolated):   # sama tulos omassa prosessissa
-            data_b, index_b, count, per_file = builder([p1, p2], key)
-            data, index = array("Q"), array("Q")
+            data_b, index_b, count, per_file, mask_type, masks_b = builder([p1, p2], key)
+            data, index, masks = array("Q"), array("Q"), array(mask_type)
             data.frombytes(data_b)
             index.frombytes(index_b)
-            ds = DomainSet(key, data, index, count)
-            self.assertEqual((count, per_file), (20000, [12000, 10000]))
+            masks.frombytes(masks_b)
+            ds = DomainSet(key, data, index, count, masks, ("a", "b"))
+            self.assertEqual((count, per_file, mask_type, len(masks)), (20000, [12000, 10000], "B", 20000))
             self.assertTrue(all(n in ds for n in names))
             self.assertFalse(any(f"x{i}.esimerkki.fi" in ds for i in range(20000)))
+            # millä listalla nimi on: vain a, molemmilla, vain b
+            self.assertTrue(all(ds.lookup(n) == ["a"] for n in names[:10000]))
+            self.assertTrue(all(ds.lookup(n) == ["a", "b"] for n in names[10000:12000]))
+            self.assertTrue(all(ds.lookup(n) == ["b"] for n in names[12000:]))
+            self.assertIsNone(ds.lookup("x1.esimerkki.fi"))
         self.assertNotIn("a.fi", DomainSet())
+        self.assertIsNone(DomainSet().lookup("a.fi"))
+
+    def test_mask_width(self):
+        from sihti.filtering import _mask_type
+        self.assertEqual([_mask_type(n) for n in (1, 8, 9, 16, 17, 32, 33, 64, 100)],
+                         ["B", "B", "H", "H", "I", "I", "Q", "Q", "Q"])
 
     def test_fast_validation_matches_regex_on_real_names(self):
         from sihti.filtering import _DOMAIN_RE, _valid_list_domain
@@ -195,6 +207,32 @@ class TestLearnable(unittest.TestCase):
             self.assertEqual(learnable(raw), want, raw)
         for raw in ("8.8.8.8", "127.0.0.1", "0.0.0.0", "example.com", "pankki.fi:4000", "a b", "", "x" * 300 + ".local"):
             self.assertIsNone(learnable(raw), raw)
+
+
+class TestQueryLogMigration(unittest.TestCase):
+    def test_old_database_gets_detail_column(self):
+        import sqlite3
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        db = sqlite3.connect(os.path.join(d, "kyselyt.db"))
+        db.executescript("CREATE TABLE kyselyt (ts REAL NOT NULL, client TEXT NOT NULL, domain TEXT NOT NULL, "
+                         "qtype TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, ms REAL);")
+        db.execute("INSERT INTO kyselyt VALUES (?,?,?,?,?,?,?)", (time.time(), "10.0.0.2", "vanha.fi", "A", "estetty", "lista", 0.1))
+        db.commit()
+        db.close()
+        qlog = QueryLog({"data_dir": d, "log_queries": True, "log_retention_days": 7})
+        qlog.add("10.0.0.3", "uusi.fi", "A", "estetty", "oma", 0.2, "uusi.fi")
+        stop = threading.Event()
+        t = threading.Thread(target=qlog.writer_loop, args=(stop,))
+        t.start()
+        time.sleep(1.5)
+        stop.set()
+        t.join()
+        rows = {r["domain"]: r for r in qlog.recent()}
+        self.assertIsNone(rows["vanha.fi"]["detail"])
+        self.assertEqual(rows["uusi.fi"]["detail"], "uusi.fi")
+        self.assertEqual(qlog.summary()["blocked_domains"], 2)
+        qlog._rdb.close()
 
 
 # ------------------------------------------------------------- integraatiotesti
@@ -284,11 +322,37 @@ class TestService(unittest.TestCase):
 
     def test_status_and_log(self):
         udp_ask(self.dns_port, "ads.example.com")
+        udp_ask(self.dns_port, "lapi.example.org")
         time.sleep(1.5)  # loki kirjoitetaan erissä
         s = self.api("/api/status")
         self.assertGreater(s["total"], 0)
         self.assertGreater(s["blocked"], 0)
-        self.assertTrue(any(r["domain"] == "ads.example.com" for r in self.api("/api/log?status=estetty")))
+        self.assertGreater(s["passed"], 0)
+        self.assertEqual(s["total"], s["passed"] + s["blocked"] + s["errors"])
+        self.assertGreaterEqual(s["blocked_domains"], 1)
+        self.assertGreaterEqual(s["passed_domains"], 1)
+        self.assertEqual((s["domains_on_lists"], s["lists_enabled"]), (2, 1))
+        rows = [r for r in self.api("/api/log?status=estetty") if r["domain"] == "ads.example.com"]
+        self.assertTrue(rows)
+        self.assertEqual((rows[0]["reason"], rows[0]["detail"]), ("lista", self.cfg["lists"][0]["url"]))
+        passed = self.api("/api/log?status=lapaisi")
+        self.assertTrue(any(r["domain"] == "lapi.example.org" for r in passed))
+        self.assertTrue(all(r["status"] in ("sallittu", "valimuisti") for r in passed))
+
+    def test_reason_for_custom_rules(self):
+        self.api("/api/custom", "POST", {"kind": "deny", "value": "syy.example.com"})
+        self.api("/api/custom", "POST", {"kind": "deny_regex", "value": "^mainos\\d"})
+        self.api("/api/custom", "POST", {"kind": "allow", "value": "ok.syy.example.com"})
+        c = self.api("/api/check?domain=ali.syy.example.com")
+        self.assertEqual((c["blocked"], c["reason"], c["detail"]), (True, "oma", "syy.example.com"))
+        c = self.api("/api/check?domain=mainos7.example.org")
+        self.assertEqual((c["blocked"], c["reason"], c["detail"]), (True, "lauseke", "^mainos\\d"))
+        c = self.api("/api/check?domain=x.ok.syy.example.com")
+        self.assertEqual((c["blocked"], c["reason"], c["detail"]), (False, "sallinta", "ok.syy.example.com"))
+        udp_ask(self.dns_port, "ali.syy.example.com")
+        time.sleep(1.5)
+        row = self.api("/api/log?search=ali.syy.example.com")[0]
+        self.assertEqual((row["status"], row["reason"], row["detail"]), ("estetty", "oma", "syy.example.com"))
 
     @unittest.skipUnless(shutil.which("openssl"), "openssl puuttuu")
     def test_https_redirect_and_renew(self):

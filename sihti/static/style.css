@@ -97,6 +97,27 @@ main { max-width: 1180px; margin: 0 auto; padding: 2rem clamp(16px, 4vw, 40px) 3
   max-width: 34ch; margin: 0 0 1.75rem; letter-spacing: -.015em; }
 .lead b { font-variant-numeric: tabular-nums; }
 .lead .caught { color: var(--lingon); }
+
+/* Tilastoruudut: luvut tekstin värillä, tunniste värimerkillä */
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; }
+.kpi { position: relative; display: flex; flex-direction: column; gap: .15rem; min-width: 0;
+  padding: .9rem 1.1rem 1rem; background: var(--paper); border: 1px solid var(--line);
+  border-radius: var(--radius-m); color: var(--spruce); text-decoration: none; }
+.kpi:hover { border-color: var(--moss); }
+.kpi::after { content: "→"; position: absolute; top: .8rem; right: 1rem; color: var(--muted); font-size: .9rem; }
+.kpi-label { display: flex; align-items: center; gap: .45rem; padding-right: 1.25rem;
+  color: var(--muted); font-size: .85rem; font-weight: 550; }
+.kpi-label .k { width: .7rem; height: .7rem; border-radius: 2px; flex-shrink: 0; }
+.kpi-label .k.ok { background: var(--moss); }
+.kpi-label .k.no { background: var(--lingon); }
+.kpi-value { font-size: clamp(1.4rem, 2.6vw, 2rem); font-weight: 650; line-height: 1.2;
+  letter-spacing: -.01em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.kpi-value .pct { font-size: .9rem; font-weight: 550; color: var(--muted); letter-spacing: 0; white-space: nowrap; }
+.kpi-sub { color: var(--muted); font-size: .8rem; }
+.split { display: flex; gap: 2px; height: 8px; margin: .75rem 0 2.25rem; }
+.split span { flex: 0 1 0; min-width: 0; border-radius: 999px; }
+.split .ok { background: var(--moss); }
+.split .no { background: var(--lingon); }
 .sieve { position: relative; }
 .legend { display: flex; gap: .4rem 1rem; align-items: center; font-size: .85rem; color: var(--muted);
   margin-bottom: .5rem; flex-wrap: wrap; }
@@ -124,7 +145,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 2rem clamp(16px, 4vw, 40px) 3
   padding: .35rem .5rem; font-size: .9rem; border-radius: var(--radius-s); overflow: hidden; }
 .toplist li .bar { position: absolute; inset: 0 auto 0 0; background: var(--moss); opacity: .1; z-index: 0; }
 #top-blocked li .bar { background: var(--lingon); }
-.toplist li span { position: relative; z-index: 1; }
+.toplist li span, .toplist li a { position: relative; z-index: 1; }
+.toplist a.name { color: inherit; text-decoration: none; }
+.toplist a.name:hover { text-decoration: underline; }
 .toplist li .n { color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .toplist li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty { color: var(--muted); font-size: .9rem; }
@@ -141,6 +164,8 @@ table.log { width: 100%; border-collapse: collapse; font-size: .875rem; }
 .log td.dom { white-space: normal; word-break: break-all; min-width: 14rem; }
 .log .r { text-align: right; font-variant-numeric: tabular-nums; }
 .log tr.estetty td.dom { color: var(--lingon); }
+.log td.why { white-space: normal; overflow-wrap: anywhere; min-width: 10rem; max-width: 22rem; color: var(--muted); }
+.log tr.estetty td.why { color: var(--spruce); }
 .tag { font-size: .8rem; padding: .1rem .45rem; border-radius: 999px; background: var(--line); }
 .tag.estetty { background: color-mix(in srgb, var(--lingon) 15%, transparent); color: var(--lingon); }
 .tag.sallittu { background: color-mix(in srgb, var(--moss) 15%, transparent); color: var(--moss); }
@@ -181,8 +206,14 @@ legend { font-weight: 650; padding: 0; margin-bottom: .25rem; }
 .grid2 label:not(.check) { display: flex; flex-direction: column; gap: .3rem; font-size: .9rem; color: var(--muted); }
 .danger .btn { margin: 0 .5rem .5rem 0; }
 
+@media (max-width: 860px) {
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 560px) {
   .blocking #state-text { display: none; }
+  .kpi { padding: .75rem .8rem .85rem; }
+  .kpi::after { display: none; }
+  .kpi-label { padding-right: 0; }
   #chart { height: 200px; }
 }
 @media (prefers-reduced-motion: no-preference) {

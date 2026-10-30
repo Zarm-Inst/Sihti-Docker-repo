@@ -10,8 +10,8 @@ Kirjoitettu pelkällä Pythonin standardikirjastolla: ei riippuvuuksia, ei tieto
 - Estolistat hosts-muodossa, pelkkinä nimilistoina tai `||nimi^` -muodossa; automaattinen päivitys
 - Omat sallitut ja estetyt verkkotunnukset (koskevat myös aliverkkotunnuksia) sekä säännölliset lausekkeet
 - Välimuisti, joka noudattaa vastausten TTL-arvoja
-- Kyselyloki SQLiteen, haku ja suodatus, estä/salli yhdellä napilla
-- Yleiskuva: vuorokauden kyselyt, estetyimmät nimet, aktiivisimmat laitteet
+- Kyselyloki SQLiteen, haku ja suodatus, estä/salli yhdellä napilla; jokaisen eston syy näkyy lokissa (mikä estolista, oma sääntö tai lauseke)
+- Yleiskuva: tilastoruudut läpäisseistä ja estetyistä kyselyistä (määrä, osuus ja eri verkkotunnukset), estolistojen nimien kokonaismäärä, vuorokauden kaavio, estetyimmät nimet ja aktiivisimmat laitteet
 - Suodatuksen tauotus (5 min / 30 min / 1 h) ja kytkin
 - Salasanasuojattu web-käyttöliittymä suomeksi, vaalea ja tumma teema
 - HTTPS omalla, automaattisesti uusiutuvalla varmenteella (http-osoitteet ohjataan https:ään)

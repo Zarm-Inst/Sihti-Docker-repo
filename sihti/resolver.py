@@ -110,16 +110,16 @@ class Resolver:
         if name == "invalid" or name.endswith(".invalid"):
             return w.build_response(data, qend, rc=w.RCODE_NXDOMAIN)
 
-        blocked, reason = self.filter.check(name)
+        blocked, reason, detail = self.filter.check(name)
         if blocked:
             resp = self._blocked_response(data, qend, qtype)
-            self.qlog.add(client, name, tname, "estetty", reason, _ms(t0))
+            self.qlog.add(client, name, tname, "estetty", reason, _ms(t0), detail)
             return resp
 
         key = (name, qtype, data[2] & 0x01)  # RD-bitti mukaan avaimeen
         cached = self.cache.get(key)
         if cached:
-            self.qlog.add(client, name, tname, "valimuisti", None, _ms(t0))
+            self.qlog.add(client, name, tname, "valimuisti", reason, _ms(t0), detail)
             return w.with_id(cached, qid)
 
         try:
@@ -136,7 +136,7 @@ class Resolver:
                 ttl = 60 if rc in (w.RCODE_NOERROR, w.RCODE_NXDOMAIN) else 0
             if rc in (w.RCODE_NOERROR, w.RCODE_NXDOMAIN):
                 self.cache.put(key, resp, ttl)
-        self.qlog.add(client, name, tname, "sallittu", None, _ms(t0))
+        self.qlog.add(client, name, tname, "sallittu", reason, _ms(t0), detail)
         return resp
 
     def _blocked_response(self, data, qend, qtype):

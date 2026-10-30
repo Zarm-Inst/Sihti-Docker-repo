@@ -84,6 +84,10 @@ class App:
                 "blocking_enabled": self.config["blocking_enabled"],
                 "pause_until": f.pause_until,
                 "domains_on_lists": len(f.blocked),
+                "lists_enabled": len(f.blocked.sources),
+                "custom_deny": len(f.deny),
+                "custom_regex": len(f.deny_regex),
+                "custom_allow": len(f.allow),
                 "lists_loading": f.rebuilding,
                 "cache_entries": len(self.resolver.cache),
                 "last_update": f.last_update,
@@ -134,8 +138,8 @@ class App:
             name = normalize_domain(raw)
             if not name:
                 raise ValueError("virheellinen verkkotunnus")
-            blocked, reason = f.check(name)
-            return {"domain": name, "blocked": blocked, "reason": reason}
+            blocked, reason, detail = f.check(name)
+            return {"domain": name, "blocked": blocked, "reason": reason, "detail": detail}
 
         if path == "/api/lists":
             lists = list(self.config["lists"])
