@@ -26,6 +26,9 @@ class QueryLog:
         self.path = os.path.join(config["data_dir"], "kyselyt.db")
         self._q = queue.Queue(maxsize=50000)
         self._read_lock = threading.Lock()
+        self._summary_lock = threading.Lock()
+        self._summary_cache = {}  # hours -> (aika, tulos)
+        self.summary_ttl = 5      # s; usea avoin välilehti tai laite ei aja raskasta kyselyä joka kerta
         db = self._connect()
         db.executescript(SCHEMA)
         if "detail" not in {r[1] for r in db.execute("PRAGMA table_info(kyselyt)")}:
@@ -79,7 +82,18 @@ class QueryLog:
             return self._rdb.execute(sql, args).fetchall()
 
     def summary(self, hours=24):
-        """Etusivun luvut yhdellä läpikäynnillä. Läpäisseet = sallitut + välimuistista."""
+        """Etusivun luvut. Samanaikaiset pyynnöt odottavat yhtä laskentaa ja saavat sen tuloksen,
+        joten hidas laite ei kasaa jonoa raskaita kyselyjä."""
+        with self._summary_lock:
+            hit = self._summary_cache.get(hours)
+            if hit and time.monotonic() - hit[0] < self.summary_ttl:
+                return hit[1]
+            result = self._summary(hours)
+            self._summary_cache[hours] = (time.monotonic(), result)
+            return result
+
+    def _summary(self, hours):
+        """Yhdellä läpikäynnillä. Läpäisseet = sallitut + välimuistista."""
         since = time.time() - hours * 3600
         row = self._rows(
             "SELECT COUNT(*), SUM(status='estetty'), SUM(status='valimuisti'), SUM(status='virhe'), "
@@ -134,6 +148,7 @@ class QueryLog:
         return [dict(zip(keys, r)) for r in self._rows(sql, args)]
 
     def clear(self):
+        self._summary_cache.clear()
         with self._read_lock:
             db = self._connect()
             db.execute("DELETE FROM kyselyt")

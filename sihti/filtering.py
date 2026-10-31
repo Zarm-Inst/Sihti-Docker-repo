@@ -5,6 +5,7 @@ import multiprocessing
 from array import array
 from bisect import bisect_left
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from concurrent.futures.process import BrokenProcessPool
 import logging
 import os
@@ -230,29 +231,52 @@ def _mask_type(n_lists):
     return "Q"
 
 
-BUILD_WORKERS = 2   # muuttuneet listat jäsennetään rinnakkain; maltillinen määrä muistin takia
+BUILD_WORKERS = 2        # muuttuneet listat jäsennetään rinnakkain; maltillinen määrä muistin takia
+BUILD_TIMEOUT = 3600    # s; jumiutunut käsittely keskeytetään, jotta päivitys ei jää päälle
+DOWNLOAD_TIMEOUT = 900  # s; yhden listan lataus kokonaisuudessaan
+
+
+def _build_workers(n_lists):
+    """Rinnakkaisten prosessien määrä. Pienimuistisilla laitteilla (esim. Pi Zero 2 W, 512 Mt)
+    vain yksi, jotta muisti ei lopu eikä laite ala käyttää sivutustilaa."""
+    try:
+        with open("/proc/meminfo") as f:
+            total_kb = int(next(line for line in f if line.startswith("MemTotal")).split()[1])
+    except (OSError, StopIteration, ValueError, IndexError):
+        total_kb = 0
+    limit = 1 if 0 < total_kb < 1_200_000 else BUILD_WORKERS
+    return max(1, min(n_lists, os.cpu_count() or 1, limit))
 
 
 def _build_isolated(paths, key):
-    """Rakentaa erillisissä prosesseissa: ensin muuttuneet listat jäsennetään rinnakkain
-    välimuistiin, sitten yhdistetään. Jos prosessi kaatuu (esim. muisti loppuu), nostetaan
-    virhe eikä jäädä odottamaan ikuisesti. Jos erillistä prosessia ei voi käynnistää lainkaan,
-    rakennetaan tässä prosessissa."""
-    workers = max(1, min(len(paths), os.cpu_count() or 1, BUILD_WORKERS))
+    """Rakentaa erillisissä prosesseissa: ensin muuttuneet listat jäsennetään välimuistiin,
+    sitten yhdistetään. Jos prosessi kaatuu (esim. muisti loppuu) tai käsittely kestää yli
+    BUILD_TIMEOUT, nostetaan virhe eikä jäädä odottamaan. Jos erillistä prosessia ei voi
+    käynnistää lainkaan, rakennetaan tässä prosessissa."""
     try:
-        ex = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+        ex = ProcessPoolExecutor(max_workers=_build_workers(len(paths)),
+                                 mp_context=multiprocessing.get_context("spawn"))
         cached = [ex.submit(_list_fingerprints, p, key, False) for p in paths]
     except Exception as e:  # noqa: BLE001
         log.warning("erillistä prosessia ei voitu käyttää (%s), rakennetaan pääprosessissa", e)
         return build_domain_set(paths, key)
-    with ex:
-        try:
-            for c in cached:
-                c.result()
-            return ex.submit(build_domain_set, paths, key).result()
-        except BrokenProcessPool:
-            raise RuntimeError("listojen käsittely keskeytyi, koska erillinen prosessi pysähtyi "
-                               "(loppuiko muisti?)") from None
+    deadline = time.monotonic() + BUILD_TIMEOUT
+    left = lambda: max(1.0, deadline - time.monotonic())  # noqa: E731
+    try:
+        for c in cached:
+            c.result(timeout=left())
+        result = ex.submit(build_domain_set, paths, key).result(timeout=left())
+    except BrokenProcessPool:
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise RuntimeError("listojen käsittely keskeytyi, koska erillinen prosessi pysähtyi "
+                           "(loppuiko muisti?)") from None
+    except FutureTimeout:
+        for proc in list(getattr(ex, "_processes", {}).values()):   # jumiutuneet prosessit pois
+            proc.kill()
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise RuntimeError(f"listojen käsittely kesti yli {BUILD_TIMEOUT // 60} min ja keskeytettiin") from None
+    ex.shutdown(wait=True)
+    return result
 
 
 def normalize_domain(raw):
@@ -300,6 +324,7 @@ class Filter:
         self._active = 0          # käynnissä tai jonossa olevat päivitykset
         self.rebuilding = False
         self.build_error = None
+        self._progress = None     # {"phase": "lataus"|"käsittely", "done", "total", "since"}
         self._built_sig = None    # listat, joista nykyinen joukko rakennettiin
         self.blocked = DomainSet()
         self.allow = set()        # sallitaan + kaikki aliverkkotunnukset
@@ -468,6 +493,14 @@ class Filter:
         """Listoja ladataan tai estojoukkoa rakennetaan (tai päivitys odottaa vuoroaan)."""
         return self._active > 0 or self.rebuilding
 
+    def progress(self):
+        """Päivityksen vaihe käyttöliittymälle, esim. {"phase": "lataus", "done": 1, "total": 3,
+        "elapsed": 12.5}, tai None."""
+        p = self._progress
+        if not p or not self.updating:
+            return None
+        return {k: v for k, v in p.items() if k != "since"} | {"elapsed": round(time.time() - p["since"], 1)}
+
     def _download(self, url):
         """Lataa listan suoraan levylle. Jos palvelin kertoo, ettei lista ole muuttunut (ETag /
         Last-Modified), tai sisältö on täsmälleen sama kuin ennen, vanha tiedosto jää paikalleen
@@ -485,6 +518,7 @@ class Filter:
             digest = hashlib.sha256()
             try:
                 req = urllib.request.Request(url, headers=headers)
+                deadline = time.monotonic() + DOWNLOAD_TIMEOUT
                 with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
                     while True:   # paloina: suurikaan lista ei vie muistia
                         chunk = r.read(1 << 16)
@@ -492,6 +526,8 @@ class Filter:
                             break
                         digest.update(chunk)
                         f.write(chunk)
+                        if time.monotonic() > deadline:
+                            raise TimeoutError(f"lataus kesti yli {DOWNLOAD_TIMEOUT // 60} min")
                     new = {"etag": r.headers.get("ETag"), "modified": r.headers.get("Last-Modified"),
                            "sha256": digest.hexdigest()}
             except urllib.error.HTTPError as e:
@@ -527,12 +563,17 @@ class Filter:
                 urls = [e["url"] for e in self.config["lists"] if e.get("enabled", True)]
                 if missing_only:
                     urls = [u for u in urls if not os.path.exists(self._list_file(u))]
-                if urls:
-                    with ThreadPoolExecutor(max_workers=min(4, len(urls)), thread_name_prefix="lataus") as ex:
-                        list(ex.map(self._download, urls))
-                self.rebuild()
-                if not missing_only:
-                    self.last_update = time.time()
+                try:
+                    if urls:
+                        self._progress = {"phase": "lataus", "done": 0, "total": len(urls), "since": time.time()}
+                        with ThreadPoolExecutor(max_workers=min(4, len(urls)), thread_name_prefix="lataus") as ex:
+                            for _ in ex.map(self._download, urls):
+                                self._progress["done"] += 1
+                    self.rebuild()
+                    if not missing_only:
+                        self.last_update = time.time()
+                finally:
+                    self._progress = None
         finally:
             with self._active_lock:
                 self._active -= 1
@@ -576,6 +617,7 @@ class Filter:
             if sig == self._built_sig:
                 return False
             self.rebuilding = True
+            self._progress = {"phase": "käsittely", "since": time.time()}
             t0 = time.monotonic()
             try:
                 if paths:
@@ -618,6 +660,12 @@ class Filter:
     def updater_loop(self, stop_event):
         # Tallennetut listat ensin (välimuistista nopeasti); puuttuvat, esim. ensimmäisellä
         # käynnistyksellä kaikki, ladataan heti
-        self.update_lists(missing_only=True)
-        while not stop_event.wait(max(1, self.config["update_interval_hours"]) * 3600):
-            self.update_lists()
+        missing_only = True
+        while True:
+            try:
+                self.update_lists(missing_only)
+            except Exception:  # noqa: BLE001 — seuraava ajastettu päivitys yrittää uudelleen
+                log.exception("listojen päivitys epäonnistui")
+            missing_only = False
+            if stop_event.wait(max(1, self.config["update_interval_hours"]) * 3600):
+                return

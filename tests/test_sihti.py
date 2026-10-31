@@ -322,6 +322,58 @@ class TestListUpdates(unittest.TestCase):
         self.assertIn("toka.example.com", filt.blocked)
         self.assertIsNone(filt.build_error)
 
+    def test_stuck_build_times_out(self):
+        from unittest import mock
+        import sihti.filtering as F
+        filt = Filter(self.cfg)
+        stuck = mock.MagicMock()
+        stuck.submit.return_value.result.side_effect = F.FutureTimeout()
+        with mock.patch.object(F, "ProcessPoolExecutor", return_value=stuck):
+            filt.update_lists()
+        self.assertIn("keskeytettiin", filt.build_error)
+        self.assertFalse(filt.updating)
+        self.assertIsNone(filt.progress())
+
+    def test_progress_reported_during_download(self):
+        import functools
+        from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+        class Slow(SimpleHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(1)
+                super().do_GET()
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Slow, directory=self.dir))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.cfg.update(lists=[{"url": f"http://127.0.0.1:{srv.server_address[1]}/lahde.txt", "enabled": True}])
+        filt = Filter(self.cfg)
+        filt.update_async()
+        time.sleep(0.5)
+        self.assertTrue(filt.updating)
+        self.assertEqual({k: v for k, v in filt.progress().items() if k != "elapsed"},
+                         {"phase": "lataus", "done": 0, "total": 1})
+        for _ in range(100):
+            if not filt.updating:
+                break
+            time.sleep(0.1)
+        self.assertFalse(filt.updating)
+        self.assertIsNone(filt.progress())
+        self.assertIn("eka.example.com", filt.blocked)
+
+    def test_updater_loop_survives_errors(self):
+        from unittest import mock
+        filt = Filter(self.cfg)
+        stop = threading.Event()
+        stop.set()
+        with mock.patch.object(filt, "update_lists", side_effect=OSError("levy täynnä")) as upd, \
+                self.assertLogs("sihti.suodatin", "ERROR"):
+            filt.updater_loop(stop)   # ei saa kaatua; palaa, koska stop on asetettu
+        upd.assert_called_once_with(True)
+
 
 class TestQueryLogMigration(unittest.TestCase):
     def test_old_database_gets_detail_column(self):
@@ -339,13 +391,18 @@ class TestQueryLogMigration(unittest.TestCase):
         stop = threading.Event()
         t = threading.Thread(target=qlog.writer_loop, args=(stop,))
         t.start()
+        self.addCleanup(t.join)
+        self.addCleanup(stop.set)
         time.sleep(1.5)
-        stop.set()
-        t.join()
         rows = {r["domain"]: r for r in qlog.recent()}
         self.assertIsNone(rows["vanha.fi"]["detail"])
         self.assertEqual(rows["uusi.fi"]["detail"], "uusi.fi")
         self.assertEqual(qlog.summary()["blocked_domains"], 2)
+        qlog.add("10.0.0.4", "kolmas.fi", "A", "estetty", "oma", 0.2, "kolmas.fi")
+        time.sleep(1.5)
+        self.assertEqual(qlog.summary()["blocked_domains"], 2, "tulos välimuistista")
+        qlog.summary_ttl = 0
+        self.assertEqual(qlog.summary()["blocked_domains"], 3)
         qlog._rdb.close()
 
 
@@ -372,6 +429,7 @@ class TestService(unittest.TestCase):
         cls.filt = Filter(cls.cfg)
         cls.filt.update_lists()
         cls.qlog = QueryLog(cls.cfg)
+        cls.qlog.summary_ttl = 0   # testit tarkistavat luvut heti kyselyjen jälkeen
         cls.stop = threading.Event()
         threading.Thread(target=cls.qlog.writer_loop, args=(cls.stop,), daemon=True).start()
         cls.resolver = Resolver(cls.cfg, cls.filt, cls.qlog)

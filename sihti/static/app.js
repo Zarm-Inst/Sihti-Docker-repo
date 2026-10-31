@@ -30,6 +30,12 @@ function reasonText(reason, detail) {
 }
 const reasonTitle = (reason, detail) => reason === "lista" && detail ? detail.split(" ").join("\n") : (detail || "");
 
+// "ladataan listoja 1/3 (12 s)" tai "käsitellään listoja (1 min 5 s)"
+function progressText(p) {
+  if (!p) return "päivitetään…";
+  const e = Math.round(p.elapsed), t = e >= 60 ? `${Math.floor(e / 60)} min ${e % 60} s` : `${e} s`;
+  return p.phase === "lataus" ? `ladataan listoja ${p.done}/${p.total} (${t})` : `käsitellään listoja (${t})`;
+}
 const plural = (n, one, many) => `${fmt.format(n)}\u00a0${n === 1 ? one : many}`;  // luku ja sana samalle riville
 function durationFmt(sec) {
   const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
@@ -108,7 +114,11 @@ window.addEventListener("hashchange", route);
 
 /* ---------- tila ja suodatuskytkin ---------- */
 let status = null;
-async function refreshStatus() {
+let statusReq = null;
+function refreshStatus() {   // hitaalla laitteella ei lähetetä uutta pyyntöä edellisen ollessa kesken
+  return statusReq || (statusReq = loadStatus().finally(() => (statusReq = null)));
+}
+async function loadStatus() {
   try { status = await api("/api/status"); } catch { return; }
   const dot = $("#state-dot"), txt = $("#state-text"), btn = $("#toggle");
   dot.className = "dot " + (status.blocking ? "on" : "off");
@@ -118,7 +128,7 @@ async function refreshStatus() {
   btn.textContent = status.blocking ? "Poista käytöstä" : "Ota käyttöön";
   $("#pause").hidden = !status.blocking;
   if (current === "yleiskuva") { renderHeadline(); renderKpis(); }
-  if (current === "listat" && status.lists_updating) waitForLists();
+  if (current === "listat" && status.lists_updating && !listWait) { listState = listStateFrom(status); waitForLists(); }
 }
 $("#toggle").addEventListener("click", async () => {
   await api("/api/blocking", { method: "POST", body: { enabled: !status.blocking } });
@@ -156,10 +166,10 @@ function renderKpis() {
 
   const loading = s.lists_updating && !s.domains_on_lists;
   $("#k-lists").textContent = loading ? "ladataan…" : fmt.format(s.domains_on_lists);
-  const extra = [plural(s.lists_enabled, "lista", "listaa") + " käytössä"];
+  const extra = loading ? [] : [plural(s.lists_enabled, "lista", "listaa") + " käytössä"];
   if (s.custom_deny) extra.push(plural(s.custom_deny, "oma esto", "omaa estoa"));
   if (s.custom_regex) extra.push(plural(s.custom_regex, "lauseke", "lauseketta"));
-  if (s.lists_updating && s.domains_on_lists) extra.push("päivitetään…");
+  if (s.lists_updating) extra.push(progressText(s.lists_progress));
   else if (s.build_error) extra.push("viimeisin päivitys epäonnistui");
   $("#k-lists-sub").textContent = extra.join(" · ");
 
@@ -329,14 +339,26 @@ $("#check-form").addEventListener("submit", async (e) => {
 });
 
 /* ---------- estolistat ---------- */
-async function loadLists(data) {
+// Päivityksen tila: {updating, progress, build_error}. Seurataan kevyellä rajapinnalla, joka ei
+// aja kyselylokin tilastoja (hitaalla laitteella ne kilpailisivat listojen käsittelyn kanssa).
+let listState = null;
+const listStateFrom = (s) => s && { updating: s.lists_updating, progress: s.lists_progress, build_error: s.build_error };
+let listBase = "";
+function renderListState() {
+  let text = listBase;
+  if (listState?.updating) text += ` Päivitys käynnissä: ${progressText(listState.progress)}.`;
+  else if (listState?.build_error) text += ` Viimeisin päivitys epäonnistui: ${listState.build_error}`;
+  $("#list-summary").textContent = text;
+}
+
+async function loadLists(data, state) {
   const lists = data || await api("/api/lists");
   const total = lists.filter((l) => l.enabled).reduce((s, l) => s + (l.count || 0), 0);
-  let summary = `${lists.length} listaa, käytössä olevissa yhteensä ${fmt.format(total)} riviä (päällekkäiset lasketaan kerran suodatuksessa).`;
-  if (status?.lists_updating) summary += " Listoja päivitetään…";
-  else if (status?.build_error) summary += ` Viimeisin päivitys epäonnistui: ${status.build_error}`;
-  $("#list-summary").textContent = summary;
-  if (status?.lists_updating) waitForLists();
+  listBase = `${lists.length} listaa, käytössä olevissa yhteensä ${fmt.format(total)} riviä (päällekkäiset lasketaan kerran suodatuksessa).`;
+  if (state) listState = state;   // juuri haettu tila muutoksen jälkeen
+  else if (!listWait) listState = listStateFrom(status) || listState;   // näkymään tultaessa
+  renderListState();
+  if (listState?.updating) waitForLists();
   $("#lists").replaceChildren(...lists.map((l) => {
     const cb = el("input", { type: "checkbox", "aria-label": "Käytössä" });
     cb.checked = l.enabled;
@@ -359,10 +381,11 @@ $("#list-update").addEventListener("click", async () => {
   listsChanged();
 });
 
-// Listojen lataus ja käsittely jatkuvat taustalla: lukuja päivitetään, kunnes työ on valmis.
+// Listojen lataus ja käsittely jatkuvat taustalla: tila päivittyy, kunnes työ on valmis.
 async function listsChanged(data) {
-  await refreshStatus();
-  loadLists(data);
+  let state;
+  try { state = await api("/api/lists/progress"); } catch { /* näytetään ilman tilaa */ }
+  loadLists(data, state);
 }
 let listWait = null;
 function waitForLists() {
@@ -370,16 +393,19 @@ function waitForLists() {
   const b = $("#list-update");
   b.disabled = true; b.textContent = "Päivitetään…";
   listWait = (async () => {
-    while (status?.lists_updating) {
+    for (;;) {
       await new Promise((r) => setTimeout(r, 1500));
-      await refreshStatus();
+      try { listState = await api("/api/lists/progress"); } catch { break; }
+      if (!listState.updating) break;
+      if (current === "listat") renderListState();
     }
-  })().finally(() => {
+  })().finally(async () => {
     listWait = null;
     b.disabled = false; b.textContent = "Päivitä listat nyt";
+    await refreshStatus();
+    listState = listStateFrom(status);
     if (current === "listat") loadLists();
   });
-  if (current === "listat") loadLists();   // näyttää "päivitetään" heti
   return listWait;
 }
 

@@ -89,6 +89,7 @@ class App:
                 "custom_allow": len(f.allow),
                 "lists_loading": f.rebuilding,
                 "lists_updating": f.updating,
+                "lists_progress": f.progress(),
                 "build_error": f.build_error,
                 "cache_entries": len(self.resolver.cache),
                 "last_update": f.last_update,
@@ -161,6 +162,11 @@ class App:
                 f.update_async(missing_only=True)   # uusi tai käyttöön otettu lista ladataan heti
             return [{**l, **f.list_status.get(l["url"], {})} for l in self.config["lists"]]
 
+        if path == "/api/lists/progress" and method == "GET":
+            # Kevyt tila päivityksen seurantaan: ei kyselylokin tilastoja
+            return {"updating": f.updating, "progress": f.progress(), "build_error": f.build_error,
+                    "domains_on_lists": len(f.blocked), "lists_enabled": len(f.blocked.sources),
+                    "last_update": f.last_update}
         if path == "/api/lists/update" and method == "POST":
             f.update_async()
             return {"ok": True, "running": True}
