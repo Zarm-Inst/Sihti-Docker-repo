@@ -585,6 +585,11 @@ class TestService(unittest.TestCase):
         self.api("/api/custom", "POST", {"kind": "allow", "value": "ali.oma.example.com"})
         self.assertEqual(answer_ip(udp_ask(self.dns_port, "ali.oma.example.com")), "1.2.3.4")
 
+    def test_ui_version_reported(self):
+        v = self.api("/api/status")["ui_version"]
+        self.assertRegex(v, r"^[0-9a-f]{12}$")
+        self.assertEqual(self.api("/api/session")["ui_version"], v)
+
     def test_csrf_header_required(self):
         req = urllib.request.Request(self.base + "/api/cache/clear", method="POST", data=b"{}")
         with self.assertRaises(urllib.error.HTTPError) as e:
@@ -634,7 +639,7 @@ class TestService(unittest.TestCase):
             time.sleep(0.1)
         self.assertEqual(s["domains_on_lists"], before + 2)
         lst = next(l for l in self.api("/api/lists") if l["url"] == extra)
-        self.assertEqual((lst["count"], lst["error"]), (2, None))
+        self.assertEqual((lst["count"], lst["error"], lst["in_use"]), (2, None, True))
         self.api("/api/lists", "DELETE", {"url": extra})
         for _ in range(100):
             if not self.api("/api/status")["lists_updating"]:

@@ -21,6 +21,16 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 SESSION_TTL = 7 * 86400
 
 
+def ui_version():
+    """Käyttöliittymän tiedostojen tunniste. Selain lataa sivun uudelleen, kun tunniste vaihtuu,
+    jottei päivityksen jälkeen auki jäänyt välilehti aja vanhaa koodia uutta palvelinta vasten."""
+    h = hashlib.sha256()
+    for name in sorted(os.listdir(STATIC_DIR)):
+        with open(os.path.join(STATIC_DIR, name), "rb") as f:
+            h.update(name.encode() + b"\0" + f.read())
+    return h.hexdigest()[:12]
+
+
 def hash_password(password):
     salt = secrets.token_hex(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 200_000)
@@ -51,6 +61,7 @@ def verify_password(password, stored):
 class App:
     def __init__(self, config, filt, qlog, resolver, certs=None):
         self.config = config
+        self.ui_version = ui_version()
         self.certs = certs          # CertManager tai None (HTTPS pois)
         self.filter = filt
         self.qlog = qlog
@@ -80,6 +91,7 @@ class App:
             active, skipped = f.list_counts()
             return {
                 **s,
+                "ui_version": self.ui_version,
                 "blocking": f.active,
                 "blocking_enabled": self.config["blocking_enabled"],
                 "pause_until": f.pause_until,
@@ -168,8 +180,14 @@ class App:
                     f.reanalyze()
                 else:
                     f.update_async(missing_only=True)   # uusi tai käyttöön otettu lista ladataan heti
-            return [{**l, **f.list_status.get(l["url"], {}), "skipped_until": f.skipped_until(l)}
-                    for l in self.config["lists"]]
+            sources = set(f.blocked.sources)
+            out = []
+            for l in self.config["lists"]:
+                skipped = f.skipped_until(l)
+                # Käytössä = mukana estojoukossa eikä ohitettu (sama laskutapa kuin yleiskuvassa)
+                in_use = l.get("enabled", True) and not skipped and l["url"] in sources
+                out.append({**l, **f.list_status.get(l["url"], {}), "skipped_until": skipped, "in_use": in_use})
+            return out
 
         if path == "/api/lists/progress" and method == "GET":
             # Kevyt tila päivityksen seurantaan: ei kyselylokin tilastoja
@@ -290,7 +308,8 @@ def make_handler(app):
 
             if path == "/api/session":
                 return self._send(200, {"auth_required": app.auth_required(),
-                                        "logged_in": app.valid_session(self._token())})
+                                        "logged_in": app.valid_session(self._token()),
+                                        "ui_version": app.ui_version})
             if path == "/api/login" and method == "POST":
                 if not app.auth_required() or verify_password(body.get("password", ""), app.config["password_hash"]):
                     token = app.new_session()

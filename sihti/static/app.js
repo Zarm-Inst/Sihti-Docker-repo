@@ -81,6 +81,7 @@ const dateFmt = (ts) => ts ? new Date(ts * 1000).toLocaleString("fi-FI", { day: 
 function showLogin() { $("#app").hidden = true; $("#login").hidden = false; $("#pw").focus(); }
 async function boot() {
   const s = await fetch("/api/session").then((r) => r.json());
+  uiVersion = s.ui_version;
   if (s.auth_required && !s.logged_in) return showLogin();
   $("#logout").hidden = !s.auth_required;
   $("#login").hidden = true;
@@ -119,8 +120,11 @@ let statusReq = null;
 function refreshStatus() {   // hitaalla laitteella ei lähetetä uutta pyyntöä edellisen ollessa kesken
   return statusReq || (statusReq = loadStatus().finally(() => (statusReq = null)));
 }
+let uiVersion = null;
 async function loadStatus() {
   try { status = await api("/api/status"); } catch { return; }
+  // Palvelin päivitettiin: ladataan uusi käyttöliittymä, ettei vanha koodi näytä vääriä tietoja
+  if (uiVersion && status.ui_version && status.ui_version !== uiVersion) { location.reload(); return; }
   const dot = $("#state-dot"), txt = $("#state-text"), btn = $("#toggle");
   dot.className = "dot " + (status.blocking ? "on" : "off");
   if (status.blocking) txt.textContent = "Suodatus päällä";
@@ -355,12 +359,17 @@ function renderListState() {
 
 async function loadLists(data, state) {
   const lists = data || await api("/api/lists");
-  const used = lists.filter((l) => l.enabled && !l.skipped_until);
+  const used = lists.filter((l) => l.in_use);
   const skipped = lists.filter((l) => l.skipped_until).length;
+  const off = lists.filter((l) => !l.enabled).length;
+  const waiting = lists.length - used.length - skipped - off;   // esim. lataus epäonnistunut
+  const parts = [`${used.length} käytössä`];
+  if (skipped) parts.push(`${skipped} ohitettu päällekkäisinä`);
+  if (off) parts.push(`${off} pois päältä`);
+  if (waiting) parts.push(`${waiting} ei vielä käytössä`);
   const rows = used.reduce((s, l) => s + (l.count || 0), 0);
-  listBase = `${lists.length} listaa` + (skipped ? `, joista ${skipped} ohitetaan päällekkäisinä` : "")
-    + `. Käytössä olevilla listoilla yhteensä ${fmt.format(rows)} nimeä`
-    + (status?.domains_on_lists ? `, joista ${fmt.format(status.domains_on_lists)} eri nimeä` : "") + ".";
+  listBase = `${lists.length} listaa: ${parts.join(", ")}. Käytössä olevilla listoilla yhteensä ${fmt.format(rows)} nimeä`
+    + (status?.domains_on_lists ? `, joista ${fmt.format(status.domains_on_lists)} eri nimeä (sama nimi useammalla listalla on estossa vain kerran)` : "") + ".";
   if (state) listState = state;   // juuri haettu tila muutoksen jälkeen
   else if (!listWait) listState = listStateFrom(status) || listState;   // näkymään tultaessa
   renderListState();
@@ -370,16 +379,18 @@ async function loadLists(data, state) {
     cb.checked = l.enabled;
     cb.addEventListener("change", async () => listsChanged(await api("/api/lists", { method: "PATCH", body: { url: l.url, enabled: cb.checked } })));
     const meta = el("div", { class: "meta" }, `${fmt.format(l.count || 0)} nimeä`);
-    if (l.enabled && !l.skipped_until && l.unique != null && l.count) meta.append(`, joista ${fmt.format(l.unique)} vain tällä listalla`);
+    if (l.in_use && l.unique != null && l.count) meta.append(`, joista ${fmt.format(l.unique)} vain tällä listalla`);
     meta.append(` · päivitetty ${dateFmt(l.updated)}`);
     if (l.skipped_until) {
       meta.append(" · ", el("span", { class: "skip", text: `ohitetaan, koska kaikki nimet ovat muilla listoilla; tarkistetaan uudelleen ${dayFmt(l.skipped_until)}` }),
         " ", el("button", { class: "linkbtn", text: "Käytä aina", onclick: () => setKeep(l.url, true) }));
     } else if (l.keep) {
       meta.append(" · aina käytössä ", el("button", { class: "linkbtn", text: "Salli ohitus", onclick: () => setKeep(l.url, false) }));
+    } else if (l.enabled && !l.in_use) {
+      meta.append(" · ", el("span", { class: "skip", text: "ei vielä käytössä" }));
     }
     if (l.error) meta.append(" · ", el("span", { class: "err", text: "viimeisin lataus epäonnistui: " + l.error }));
-    return el("li", { class: !l.enabled ? "off" : l.skipped_until ? "skipped" : "" }, cb, el("div", { class: "url", text: l.url }),
+    return el("li", { class: !l.enabled ? "off" : l.in_use ? "" : "skipped" }, cb, el("div", { class: "url", text: l.url }),
       el("button", { class: "linkbtn", text: "Poista", onclick: async () => {
         if (confirm("Poistetaanko lista?")) listsChanged(await api("/api/lists", { method: "DELETE", body: { url: l.url } }));
       } }), meta);
