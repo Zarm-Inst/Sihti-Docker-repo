@@ -19,6 +19,7 @@ DEFAULTS = {
         {"url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "enabled": True},
     ],
     "update_interval_hours": 24,
+    "skip_redundant_lists": True,  # ohita listat, joiden kaikki nimet ovat muilla listoilla (tarkistus viikoittain)
     "password_hash": "",           # tyhjä = ei salasanaa
     "random_password": False,      # uusi satunnainen salasana jokaisella käynnistyksellä (Docker: päällä)
     "https": True,                 # käyttöliittymä HTTPS:llä (http-osoitteet ohjataan https:ään)

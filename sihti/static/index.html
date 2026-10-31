@@ -165,6 +165,11 @@
           <label>Listojen päivitysväli (tuntia)<input id="s-interval" type="number" min="1" max="720"></label>
           <label class="check"><input id="s-log" type="checkbox"> Tallenna kyselyloki</label>
         </fieldset>
+        <fieldset>
+          <legend>Päällekkäiset estolistat</legend>
+          <label class="check"><input id="s-skip" type="checkbox"> Ohita listat, joiden kaikki nimet ovat jo muilla listoilla</label>
+          <p class="hint">Nopeuttaa listojen päivitystä. Ohitetut listat tarkistetaan viikoittain ja otetaan automaattisesti takaisin käyttöön, jos niihin tulee nimiä, joita muilla listoilla ei ole. Yksittäisen listan voi pitää aina käytössä Estolistat-sivulta.</p>
+        </fieldset>
         <button class="btn primary">Tallenna asetukset</button>
         <span id="settings-msg" class="msg" aria-live="polite"></span>
       </form>

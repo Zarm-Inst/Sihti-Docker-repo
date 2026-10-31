@@ -196,6 +196,8 @@ table.log { width: 100%; border-collapse: collapse; font-size: .875rem; }
 .lists .meta { grid-column: 2; color: var(--muted); font-size: .8rem; }
 .lists .meta .err { color: var(--lingon); }
 .lists li.off .url { color: var(--muted); text-decoration: line-through; }
+.lists li.skipped .url { color: var(--muted); }
+.lists .meta .skip { color: var(--spruce); }
 
 /* Asetukset */
 .settings { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-m);

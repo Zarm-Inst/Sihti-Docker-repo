@@ -77,13 +77,15 @@ class App:
 
         if path == "/api/status" and method == "GET":
             s = self.qlog.summary(24)
+            active, skipped = f.list_counts()
             return {
                 **s,
                 "blocking": f.active,
                 "blocking_enabled": self.config["blocking_enabled"],
                 "pause_until": f.pause_until,
                 "domains_on_lists": len(f.blocked),
-                "lists_enabled": len(f.blocked.sources),
+                "lists_enabled": active,
+                "lists_skipped": skipped,
                 "custom_deny": len(f.deny),
                 "custom_regex": len(f.deny_regex),
                 "custom_allow": len(f.allow),
@@ -154,18 +156,26 @@ class App:
             elif method == "PATCH":
                 for l in lists:
                     if l["url"] == body["url"]:
-                        l["enabled"] = bool(body["enabled"])
+                        if "enabled" in body:
+                            l["enabled"] = bool(body["enabled"])
+                        if "keep" in body:   # aina käytössä: ei ohiteta päällekkäisenä
+                            l["keep"] = bool(body["keep"])
             elif method == "DELETE":
                 lists = [l for l in lists if l["url"] != body["url"]]
             if method != "GET":
                 self.config.update(lists=lists)
-                f.update_async(missing_only=True)   # uusi tai käyttöön otettu lista ladataan heti
-            return [{**l, **f.list_status.get(l["url"], {})} for l in self.config["lists"]]
+                if method == "PATCH" and "keep" in body:
+                    f.reanalyze()
+                else:
+                    f.update_async(missing_only=True)   # uusi tai käyttöön otettu lista ladataan heti
+            return [{**l, **f.list_status.get(l["url"], {}), "skipped_until": f.skipped_until(l)}
+                    for l in self.config["lists"]]
 
         if path == "/api/lists/progress" and method == "GET":
             # Kevyt tila päivityksen seurantaan: ei kyselylokin tilastoja
+            active, skipped = f.list_counts()
             return {"updating": f.updating, "progress": f.progress(), "build_error": f.build_error,
-                    "domains_on_lists": len(f.blocked), "lists_enabled": len(f.blocked.sources),
+                    "domains_on_lists": len(f.blocked), "lists_enabled": active, "lists_skipped": skipped,
                     "last_update": f.last_update}
         if path == "/api/lists/update" and method == "POST":
             f.update_async()
@@ -173,9 +183,13 @@ class App:
 
         if path == "/api/settings":
             keys = ("upstreams", "block_mode", "log_retention_days", "log_queries",
-                    "cache_size", "update_interval_hours")
+                    "cache_size", "update_interval_hours", "skip_redundant_lists")
             if method == "POST":
                 changes = {k: body[k] for k in keys if k in body}
+                if "skip_redundant_lists" in changes:
+                    changes["skip_redundant_lists"] = bool(changes["skip_redundant_lists"])
+                reanalyze = changes.get("skip_redundant_lists", self.config["skip_redundant_lists"]) \
+                    != self.config["skip_redundant_lists"]
                 if "upstreams" in changes:
                     ups = [u.strip() for u in changes["upstreams"] if u.strip()]
                     if not ups:
@@ -186,6 +200,8 @@ class App:
                 self.config.update(**changes)
                 self.resolver.cache.size = self.config["cache_size"]
                 self.resolver.cache.clear()
+                if reanalyze:
+                    f.reanalyze()
             return {k: self.config[k] for k in keys} | {"has_password": self.auth_required(),
                                                          "random_password": bool(self.config["random_password"])}
 

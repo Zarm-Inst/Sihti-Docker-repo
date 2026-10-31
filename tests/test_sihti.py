@@ -118,7 +118,7 @@ def build_with_other_key(path):
     from sihti.filtering import DomainSet, build_domain_set
     from array import array
     key = os.urandom(16)
-    data_b, index_b, count, _, _, _ = build_domain_set([path], key)
+    data_b, index_b, count, _, _, _, _ = build_domain_set([path], key)
     data, index = array("Q"), array("Q")
     data.frombytes(data_b)
     index.frombytes(index_b)
@@ -141,7 +141,7 @@ class TestDomainSet(unittest.TestCase):
             f.write("".join(f"||{n}^\n" for n in names[10000:]))
         key = os.urandom(16)
         for builder in (build_domain_set, _build_isolated):   # sama tulos omassa prosessissa
-            data_b, index_b, count, per_file, mask_type, masks_b = builder([p1, p2], key)
+            data_b, index_b, count, per_file, mask_type, masks_b, stats = builder([p1, p2], key)
             data, index, masks = array("Q"), array("Q"), array(mask_type)
             data.frombytes(data_b)
             index.frombytes(index_b)
@@ -155,6 +155,7 @@ class TestDomainSet(unittest.TestCase):
             self.assertTrue(all(ds.lookup(n) == ["a", "b"] for n in names[10000:12000]))
             self.assertTrue(all(ds.lookup(n) == ["b"] for n in names[12000:]))
             self.assertIsNone(ds.lookup("x1.esimerkki.fi"))
+            self.assertEqual(stats, {"skippable": [], "unique": [10000, 8000]})
         self.assertNotIn("a.fi", DomainSet())
         self.assertIsNone(DomainSet().lookup("a.fi"))
 
@@ -169,7 +170,7 @@ class TestDomainSet(unittest.TestCase):
         key = os.urandom(16)
 
         def build():
-            data_b, index_b, count, _, mask_type, masks_b = build_domain_set([p], key)
+            data_b, index_b, count, _, mask_type, masks_b, _ = build_domain_set([p], key)
             data, index, masks = array("Q"), array("Q"), array(mask_type)
             data.frombytes(data_b)
             index.frombytes(index_b)
@@ -187,6 +188,40 @@ class TestDomainSet(unittest.TestCase):
             f.truncate(100)
         self.assertEqual(len(build()), 2)
         self.assertNotIn("x.example.com", build_with_other_key(p))
+
+    def test_redundant_lists_never_lose_names(self):
+        from sihti.filtering import redundant_lists
+        rnd = random.Random(5)
+        for _ in range(300):
+            n = rnd.randint(1, 7)
+            lists = [set(rnd.sample(range(40), rnd.randint(0, 15))) for _ in range(n)]
+            if rnd.random() < 0.3 and n > 1:
+                lists[-1] = set(lists[0])                       # sama lista kahdesti
+            if rnd.random() < 0.3 and n > 1:
+                lists[1] = set(list(lists[0])[:3])              # osajoukko
+            names = set().union(*lists)
+            counts = {}
+            for x in names:
+                m = sum(1 << k for k, l in enumerate(lists) if x in l)
+                counts[m] = counts.get(m, 0) + 1
+            protected = {k for k in range(n) if rnd.random() < 0.2}
+            skip, unique = redundant_lists(counts, n, [len(l) for l in lists], protected)
+            kept = [l for k, l in enumerate(lists) if k not in skip]
+            self.assertEqual(set().union(*kept) if kept else set(), names, "yksikään nimi ei saa kadota")
+            self.assertFalse(protected & set(skip))
+            for k, l in enumerate(lists):   # jäljelle jääneistä ei voi ohittaa enempää
+                if k not in skip and k not in protected:
+                    others = set().union(*[o for j, o in enumerate(lists) if j != k and j not in skip])
+                    self.assertTrue(l - others, "ohitettavissa oleva lista jäi käyttöön")
+                    self.assertEqual(unique[k], len(l - others))
+
+    def test_subset_and_duplicate_lists_skipped(self):
+        from sihti.filtering import redundant_lists
+        # a = {1,2,3}, b = {1,2} (a:n osajoukko), c = {4}, d = {4} (sama kuin c)
+        counts = {0b0011: 2, 0b0001: 1, 0b1100: 1}
+        skip, unique = redundant_lists(counts, 4, [3, 2, 1, 1])
+        self.assertEqual(sorted(skip), [1, 3])     # b ja myöhemmin lisätty d
+        self.assertEqual(unique, [3, 0, 1, 0])
 
     def test_mask_width(self):
         from sihti.filtering import _mask_type
@@ -302,6 +337,68 @@ class TestListUpdates(unittest.TestCase):
         files = {f for f in os.listdir(filt.lists_dir) if f.endswith((".txt", ".fp"))}
         self.assertEqual(len(old_files - files), 2, "poistetun listan tiedosto ja välimuisti pois")
 
+    def _lists(self, **files):
+        urls = []
+        for name, text in files.items():
+            path = os.path.join(self.dir, name + ".txt")
+            with open(path, "w") as f:
+                f.write(text)
+            urls.append({"url": "file://" + path, "enabled": True})
+        self.cfg.update(lists=urls)
+        return [u["url"] for u in urls]
+
+    def test_redundant_list_skipped_and_rechecked(self):
+        from unittest import mock
+        import sihti.filtering as F
+        big, small, other = self._lists(iso="a.example.com\nb.example.com\nc.example.com\n",
+                                        pieni="a.example.com\nb.example.com\n", muu="x.example.org\n")
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        self.assertEqual(len(filt.blocked), 4)
+        self.assertIsNotNone(filt.skipped_until({"url": small, "enabled": True}))
+        self.assertEqual(filt.list_counts(), (2, 1))
+        self.assertEqual((filt.list_status[big]["unique"], filt.list_status[other]["unique"]), (3, 1))
+        with open(os.path.join(filt.lists_dir, "tila.json")) as f:
+            self.assertIn("redundant_since", json.load(f)[small])
+
+        # Päivittäinen päivitys ei lataa ohitettua listaa, eikä joukkoa rakenneta turhaan
+        first = filt.blocked
+        with mock.patch.object(filt, "_download", wraps=filt._download) as dl:
+            filt.update_lists()
+        self.assertEqual(sorted(c.args[0] for c in dl.call_args_list), sorted([big, other]))
+        self.assertIs(filt.blocked, first)
+
+        # Viikon päästä lista tarkistetaan: yhä päällekkäinen -> ohitus jatkuu
+        filt._meta[small]["redundant_since"] -= F.REDUNDANT_RECHECK + 1
+        with mock.patch.object(filt, "_download", wraps=filt._download) as dl:
+            filt.update_lists()
+        self.assertIn(small, [c.args[0] for c in dl.call_args_list])
+        self.assertIsNotNone(filt.skipped_until({"url": small, "enabled": True}))
+
+        # Listaan tulee oma nimi: seuraavassa tarkistuksessa se otetaan takaisin käyttöön
+        with open(small[len("file://"):], "a") as f:
+            f.write("uusi.example.net\n")
+        filt._meta[small]["redundant_since"] -= F.REDUNDANT_RECHECK + 1
+        filt.update_lists()
+        self.assertIsNone(filt.skipped_until({"url": small, "enabled": True}))
+        self.assertIn("uusi.example.net", filt.blocked)
+        self.assertEqual(filt.list_counts(), (3, 0))
+
+    def test_keep_and_setting_disable_skipping(self):
+        big, small = self._lists(iso="a.example.com\nb.example.com\n", pieni="a.example.com\n")
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        self.assertEqual(filt.list_counts(), (1, 1))
+        self.cfg.update(lists=[self.cfg["lists"][0], {**self.cfg["lists"][1], "keep": True}])
+        filt.update_lists()
+        self.assertEqual(filt.list_counts(), (2, 0))
+        self.assertEqual(filt.list_status[small]["unique"], 0)
+        self.cfg.update(lists=[self.cfg["lists"][0], {**self.cfg["lists"][1], "keep": False}],
+                        skip_redundant_lists=False)
+        filt._built_sig = None
+        filt.update_lists()
+        self.assertEqual(filt.list_counts(), (2, 0))
+
     def test_crashed_build_keeps_old_set(self):
         from unittest import mock
         from concurrent.futures.process import BrokenProcessPool
@@ -313,7 +410,8 @@ class TestListUpdates(unittest.TestCase):
             f.write("0.0.0.0 toka.example.com\n")
         broken = mock.MagicMock()
         broken.submit.return_value.result.side_effect = BrokenProcessPool()
-        with mock.patch.object(F, "ProcessPoolExecutor", return_value=broken):
+        with mock.patch.object(F, "ProcessPoolExecutor", return_value=broken), \
+                self.assertLogs("sihti.suodatin", "ERROR"):
             filt.update_lists()
         self.assertIs(filt.blocked, first)
         self.assertIn("muisti", filt.build_error)
@@ -328,7 +426,8 @@ class TestListUpdates(unittest.TestCase):
         filt = Filter(self.cfg)
         stuck = mock.MagicMock()
         stuck.submit.return_value.result.side_effect = F.FutureTimeout()
-        with mock.patch.object(F, "ProcessPoolExecutor", return_value=stuck):
+        with mock.patch.object(F, "ProcessPoolExecutor", return_value=stuck), \
+                self.assertLogs("sihti.suodatin", "ERROR"):
             filt.update_lists()
         self.assertIn("keskeytettiin", filt.build_error)
         self.assertFalse(filt.updating)
@@ -518,9 +617,10 @@ class TestService(unittest.TestCase):
         os.makedirs(www)
         with open(os.path.join(www, "lisa.txt"), "w") as f:
             f.write("0.0.0.0 lisa1.example.com\n0.0.0.0 lisa2.example.com\n")
-        handler = functools.partial(SimpleHTTPRequestHandler, directory=www)
-        handler.log_message = lambda *a: None
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        class Quiet(SimpleHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=www))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)

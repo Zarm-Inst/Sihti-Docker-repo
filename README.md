@@ -8,6 +8,7 @@ Kirjoitettu pelkällä Pythonin standardikirjastolla: ei riippuvuuksia, ei tieto
 
 - DNS-palvelin UDP:llä ja TCP:llä (IPv4 ja IPv6), välitys valitsemillesi ylävirtapalvelimille
 - Estolistat hosts-muodossa, pelkkinä nimilistoina tai `||nimi^` -muodossa; automaattinen päivitys. Vain muuttuneet listat ladataan ja käsitellään (ETag / Last-Modified ja sisällön tarkistus), muuttuneet rinnakkain, ja käsitellyt listat säilytetään välimuistissa, joten listan lisäys, poisto ja uudelleenkäynnistys ovat nopeita
+- Päällekkäiset estolistat ohitetaan automaattisesti: lista, jonka kaikki nimet ovat jo muilla käytössä olevilla listoilla, jätetään pois päivityksistä (sama nimi ei katoa estosta) ja tarkistetaan viikoittain uudelleen. Estolistat-sivu näyttää, montako nimeä kukin lista tuo vain itse; yksittäisen listan voi pitää aina käytössä
 - Omat sallitut ja estetyt verkkotunnukset (koskevat myös aliverkkotunnuksia) sekä säännölliset lausekkeet
 - Välimuisti, joka noudattaa vastausten TTL-arvoja
 - Kyselyloki SQLiteen, haku ja suodatus, estä/salli yhdellä napilla; jokaisen eston syy näkyy lokissa (mikä estolista, oma sääntö tai lauseke)
@@ -148,6 +149,7 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 | `log_queries` | `true` | Kyselylokin tallennus (pois = parempi yksityisyys) |
 | `lists` | yksi lista | Estolistojen osoitteet |
 | `update_interval_hours` | `24` | Listojen päivitysväli |
+| `skip_redundant_lists` | `true` | Ohita listat, joiden kaikki nimet ovat muilla listoilla (tarkistetaan viikoittain uudelleen) |
 | `https` | `true` | HTTPS käyttöliittymään (`false` = pelkkä HTTP) |
 | `random_password` | `false` (Dockerissa `true`) | Uusi satunnainen salasana jokaisella käynnistyksellä, tulostuu lokiin |
 | `tls_extra_names` | `[]` | Lisänimet ja -osoitteet varmenteeseen |

@@ -74,6 +74,7 @@ function flash(node, text) {
 }
 
 const timeFmt = (ts) => new Date(ts * 1000).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const dayFmt = (ts) => new Date(ts * 1000).toLocaleDateString("fi-FI", { day: "numeric", month: "numeric" });
 const dateFmt = (ts) => ts ? new Date(ts * 1000).toLocaleString("fi-FI", { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit" }) : "ei koskaan";
 
 /* ---------- kirjautuminen ---------- */
@@ -167,6 +168,7 @@ function renderKpis() {
   const loading = s.lists_updating && !s.domains_on_lists;
   $("#k-lists").textContent = loading ? "ladataan…" : fmt.format(s.domains_on_lists);
   const extra = loading ? [] : [plural(s.lists_enabled, "lista", "listaa") + " käytössä"];
+  if (!loading && s.lists_skipped) extra.push(plural(s.lists_skipped, "päällekkäinen ohitettu", "päällekkäistä ohitettu"));
   if (s.custom_deny) extra.push(plural(s.custom_deny, "oma esto", "omaa estoa"));
   if (s.custom_regex) extra.push(plural(s.custom_regex, "lauseke", "lauseketta"));
   if (s.lists_updating) extra.push(progressText(s.lists_progress));
@@ -353,8 +355,12 @@ function renderListState() {
 
 async function loadLists(data, state) {
   const lists = data || await api("/api/lists");
-  const total = lists.filter((l) => l.enabled).reduce((s, l) => s + (l.count || 0), 0);
-  listBase = `${lists.length} listaa, käytössä olevissa yhteensä ${fmt.format(total)} riviä (päällekkäiset lasketaan kerran suodatuksessa).`;
+  const used = lists.filter((l) => l.enabled && !l.skipped_until);
+  const skipped = lists.filter((l) => l.skipped_until).length;
+  const rows = used.reduce((s, l) => s + (l.count || 0), 0);
+  listBase = `${lists.length} listaa` + (skipped ? `, joista ${skipped} ohitetaan päällekkäisinä` : "")
+    + `. Käytössä olevilla listoilla yhteensä ${fmt.format(rows)} nimeä`
+    + (status?.domains_on_lists ? `, joista ${fmt.format(status.domains_on_lists)} eri nimeä` : "") + ".";
   if (state) listState = state;   // juuri haettu tila muutoksen jälkeen
   else if (!listWait) listState = listStateFrom(status) || listState;   // näkymään tultaessa
   renderListState();
@@ -363,13 +369,25 @@ async function loadLists(data, state) {
     const cb = el("input", { type: "checkbox", "aria-label": "Käytössä" });
     cb.checked = l.enabled;
     cb.addEventListener("change", async () => listsChanged(await api("/api/lists", { method: "PATCH", body: { url: l.url, enabled: cb.checked } })));
-    const meta = el("div", { class: "meta" }, `${fmt.format(l.count || 0)} nimeä · päivitetty ${dateFmt(l.updated)}`);
+    const meta = el("div", { class: "meta" }, `${fmt.format(l.count || 0)} nimeä`);
+    if (l.enabled && !l.skipped_until && l.unique != null && l.count) meta.append(`, joista ${fmt.format(l.unique)} vain tällä listalla`);
+    meta.append(` · päivitetty ${dateFmt(l.updated)}`);
+    if (l.skipped_until) {
+      meta.append(" · ", el("span", { class: "skip", text: `ohitetaan, koska kaikki nimet ovat muilla listoilla; tarkistetaan uudelleen ${dayFmt(l.skipped_until)}` }),
+        " ", el("button", { class: "linkbtn", text: "Käytä aina", onclick: () => setKeep(l.url, true) }));
+    } else if (l.keep) {
+      meta.append(" · aina käytössä ", el("button", { class: "linkbtn", text: "Salli ohitus", onclick: () => setKeep(l.url, false) }));
+    }
     if (l.error) meta.append(" · ", el("span", { class: "err", text: "viimeisin lataus epäonnistui: " + l.error }));
-    return el("li", { class: l.enabled ? "" : "off" }, cb, el("div", { class: "url", text: l.url }),
+    return el("li", { class: !l.enabled ? "off" : l.skipped_until ? "skipped" : "" }, cb, el("div", { class: "url", text: l.url }),
       el("button", { class: "linkbtn", text: "Poista", onclick: async () => {
         if (confirm("Poistetaanko lista?")) listsChanged(await api("/api/lists", { method: "DELETE", body: { url: l.url } }));
       } }), meta);
   }));
+}
+// Aina käytössä: listaa ei ohiteta, vaikka kaikki sen nimet olisivat muilla listoilla
+async function setKeep(url, keep) {
+  listsChanged(await api("/api/lists", { method: "PATCH", body: { url, keep } }));
 }
 $("#list-add").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -418,6 +436,7 @@ async function loadSettings() {
   $("#s-cache").value = s.cache_size;
   $("#s-interval").value = s.update_interval_hours;
   $("#s-log").checked = s.log_queries;
+  $("#s-skip").checked = s.skip_redundant_lists;
   loadTls();
   const randomPw = !!s.random_password;
   $("#pw-new").hidden = randomPw;
@@ -467,6 +486,7 @@ $("#settings").addEventListener("submit", async (e) => {
       cache_size: Number($("#s-cache").value),
       update_interval_hours: Number($("#s-interval").value),
       log_queries: $("#s-log").checked,
+      skip_redundant_lists: $("#s-skip").checked,
     } });
     flash($("#settings-msg"), "Asetukset tallennettu.");
   } catch (err) { flash($("#settings-msg"), err.message); }

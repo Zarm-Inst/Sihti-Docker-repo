@@ -3,6 +3,7 @@ import hashlib
 import json
 import multiprocessing
 from array import array
+from collections import Counter
 from bisect import bisect_left
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -208,10 +209,34 @@ def _merge(parts, mask_type):
     return data, index, masks
 
 
-def build_domain_set(paths, key):
+def redundant_lists(mask_counts, n_lists, sizes, protected=()):
+    """Valitsee listat, jotka voi ohittaa menettämättä yhtään nimeä: jokainen ohitetun listan
+    nimi on jollain käyttöön jäävällä listalla. mask_counts = {bittimaski: nimiä}. Ohitetaan
+    yksi kerrallaan, pienin ensin, ja lasketaan tilanne uudelleen, joten kahdesta samanlaisesta
+    listasta vain toinen ohitetaan. protected: listat, joita ei ohiteta koskaan.
+    Palauttaa (ohitettavat indeksit, [vain tällä listalla olevia nimiä per lista])."""
+    n = min(n_lists, 64)   # yli 64 listaa ei voi analysoida (ei bittiä maskissa)
+    active = (1 << n) - 1
+    skipped = []
+    while True:
+        unique = [0] * n_lists
+        for m, c in mask_counts.items():
+            a = m & active
+            if a and not a & (a - 1):   # nimi on täsmälleen yhdellä käytössä olevalla listalla
+                unique[a.bit_length() - 1] += c
+        candidates = [k for k in range(n) if active >> k & 1 and not unique[k] and k not in protected]
+        if not candidates:
+            return skipped, unique
+        k = min(candidates, key=lambda k: (sizes[k], -k))   # pienin ensin; tasan: myöhemmin lisätty
+        active &= ~(1 << k)
+        skipped.append(k)
+
+
+def build_domain_set(paths, key, protected=()):
     """Lukee listatiedostot ja rakentaa DomainSetin raakadatan. Ajetaan omassa prosessissaan,
     jotta raskas jäsennys ei hidasta DNS-vastauksia (Pythonin GIL). Palauttaa
-    (data_bytes, index_bytes, nimiä_yhteensä, [rivejä_per_tiedosto], maskin_tyyppi, maskit_bytes)."""
+    (data_bytes, index_bytes, nimiä_yhteensä, [rivejä_per_tiedosto], maskin_tyyppi, maskit_bytes,
+    {"skippable": [päällekkäiset listat], "unique": [vain tällä listalla per lista]})."""
     parts, per_file = [], []
     for path in paths:
         data, index, n = _list_fingerprints(path, key)
@@ -219,9 +244,14 @@ def build_domain_set(paths, key):
         per_file.append(n)
     mask_type = _mask_type(len(paths))
     if not parts:
-        return b"", array("Q", [0] * (_BUCKETS + 1)).tobytes(), 0, [], mask_type, b""
+        return (b"", array("Q", [0] * (_BUCKETS + 1)).tobytes(), 0, [], mask_type, b"",
+                {"skippable": [], "unique": []})
     data, index, masks = _merge(parts, mask_type)
-    return data.tobytes(), index.tobytes(), len(data), per_file, mask_type, masks.tobytes()
+    sizes = [len(d) for d, _ in parts]
+    del parts
+    skippable, unique = redundant_lists(Counter(masks), len(paths), sizes, set(protected))
+    return (data.tobytes(), index.tobytes(), len(data), per_file, mask_type, masks.tobytes(),
+            {"skippable": skippable, "unique": unique})
 
 
 def _mask_type(n_lists):
@@ -234,6 +264,7 @@ def _mask_type(n_lists):
 BUILD_WORKERS = 2        # muuttuneet listat jäsennetään rinnakkain; maltillinen määrä muistin takia
 BUILD_TIMEOUT = 3600    # s; jumiutunut käsittely keskeytetään, jotta päivitys ei jää päälle
 DOWNLOAD_TIMEOUT = 900  # s; yhden listan lataus kokonaisuudessaan
+REDUNDANT_RECHECK = 7 * 86400   # s; päällekkäisenä ohitettu lista tarkistetaan uudelleen viikon päästä
 
 
 def _build_workers(n_lists):
@@ -248,7 +279,7 @@ def _build_workers(n_lists):
     return max(1, min(n_lists, os.cpu_count() or 1, limit))
 
 
-def _build_isolated(paths, key):
+def _build_isolated(paths, key, protected=()):
     """Rakentaa erillisissä prosesseissa: ensin muuttuneet listat jäsennetään välimuistiin,
     sitten yhdistetään. Jos prosessi kaatuu (esim. muisti loppuu) tai käsittely kestää yli
     BUILD_TIMEOUT, nostetaan virhe eikä jäädä odottamaan. Jos erillistä prosessia ei voi
@@ -259,13 +290,13 @@ def _build_isolated(paths, key):
         cached = [ex.submit(_list_fingerprints, p, key, False) for p in paths]
     except Exception as e:  # noqa: BLE001
         log.warning("erillistä prosessia ei voitu käyttää (%s), rakennetaan pääprosessissa", e)
-        return build_domain_set(paths, key)
+        return build_domain_set(paths, key, protected)
     deadline = time.monotonic() + BUILD_TIMEOUT
     left = lambda: max(1.0, deadline - time.monotonic())  # noqa: E731
     try:
         for c in cached:
             c.result(timeout=left())
-        result = ex.submit(build_domain_set, paths, key).result(timeout=left())
+        result = ex.submit(build_domain_set, paths, key, protected).result(timeout=left())
     except BrokenProcessPool:
         ex.shutdown(wait=False, cancel_futures=True)
         raise RuntimeError("listojen käsittely keskeytyi, koska erillinen prosessi pysähtyi "
@@ -540,7 +571,12 @@ class Filter:
                 if changed:
                     os.replace(tmp, dest)
                 with self._meta_lock:
-                    self._meta[url] = {k: v for k, v in new.items() if v}
+                    m = self._meta.setdefault(url, {})
+                    for k, v in new.items():
+                        if v:
+                            m[k] = v
+                        else:
+                            m.pop(k, None)
                     self._save_meta()
             st.update(updated=time.time(), error=None)
             log.info("%s %s", "ladattu" if changed else "ei muutoksia", url)
@@ -560,7 +596,8 @@ class Filter:
             self._active += 1
         try:
             with self._update_lock:
-                urls = [e["url"] for e in self.config["lists"] if e.get("enabled", True)]
+                urls = [e["url"] for e in self.config["lists"]
+                        if e.get("enabled", True) and not self.skipped_until(e)]
                 if missing_only:
                     urls = [u for u in urls if not os.path.exists(self._list_file(u))]
                 try:
@@ -595,15 +632,19 @@ class Filter:
         ovat muuttuneet. Muuttumattomien listojen tiivisteet luetaan välimuistista. Vanha joukko
         on käytössä, kunnes uusi on valmis. Palauttaa True, jos joukko rakennettiin."""
         with self._rebuild_lock:
-            entries, paths, urls, sig = [], [], [], []
+            entries, paths, urls, sig, protected = [], [], [], [], []
             for entry in list(self.config["lists"]):
                 url = entry["url"]
                 path = self._list_file(url)
                 st = self.list_status.setdefault(url, {"updated": None, "error": None})
+                if self.skipped_until(entry):
+                    continue   # päällekkäinen: nimet ovat muilla listoilla (lukumäärä jää näkyviin)
                 if not entry.get("enabled", True) or not os.path.exists(path):
                     st["count"] = 0
                     continue
                 fs = os.stat(path)
+                if entry.get("keep"):
+                    protected.append(len(paths))
                 entries.append(st)
                 paths.append(path)
                 urls.append(url)
@@ -620,8 +661,10 @@ class Filter:
             self._progress = {"phase": "käsittely", "since": time.time()}
             t0 = time.monotonic()
             try:
+                stats = None
                 if paths:
-                    data_b, index_b, count, per_file, mask_type, masks_b = _build_isolated(paths, self._key)
+                    data_b, index_b, count, per_file, mask_type, masks_b, stats = \
+                        _build_isolated(paths, self._key, protected)
                     data, index, masks = array("Q"), array("Q"), array(mask_type)
                     data.frombytes(data_b)
                     index.frombytes(index_b)
@@ -642,9 +685,52 @@ class Filter:
                 self.blocked = blocked
             self._built_sig = sig
             self.build_error = None
+            if stats:
+                skip = self._apply_redundancy(urls, stats)
+                # Joukko on sama ilman ohitettuja listoja, joten seuraava päivitys ei rakenna turhaan
+                self._built_sig = tuple(x for x in sig if x[0] not in skip)
             self._remove_stale_files()
             log.info("estettäviä verkkotunnuksia: %d (%.1f s)", len(blocked), time.monotonic() - t0)
             return True
+
+    def skipped_until(self, entry):
+        """Jos lista ohitetaan päällekkäisenä (kaikki sen nimet ovat muilla listoilla), aika
+        jolloin se ladataan ja tarkistetaan uudelleen; muuten None."""
+        if not self.config["skip_redundant_lists"] or entry.get("keep") or not entry.get("enabled", True):
+            return None
+        since = self._meta.get(entry["url"], {}).get("redundant_since")
+        if since and time.time() < since + REDUNDANT_RECHECK:
+            return since + REDUNDANT_RECHECK
+        return None
+
+    def list_counts(self):
+        """(käytössä olevat listat, päällekkäisinä ohitetut listat)."""
+        skipped = {e["url"] for e in self.config["lists"] if self.skipped_until(e)}
+        return len([u for u in self.blocked.sources if u not in skipped]), len(skipped)
+
+    def _apply_redundancy(self, urls, stats):
+        """Merkitsee listat, joiden kaikki nimet ovat muilla listoilla, ohitettaviksi viikoksi, ja
+        palauttaa käyttöön listat, joilla on taas omia nimiä. Palauttaa ohitettavat osoitteet."""
+        skip = {urls[k] for k in stats["skippable"]} if self.config["skip_redundant_lists"] else set()
+        now = time.time()
+        with self._meta_lock:
+            for k, url in enumerate(urls):
+                self.list_status.setdefault(url, {})["unique"] = stats["unique"][k] if k < 64 else None
+                m = self._meta.setdefault(url, {})
+                if url in skip:
+                    m["redundant_since"] = now
+                elif m.pop("redundant_since", None):
+                    log.info("lista otettu taas käyttöön, siinä on omia nimiä: %s", url)
+            self._save_meta()
+        if skip:
+            log.info("ohitetaan %d listaa, joiden kaikki nimet ovat muilla listoilla: %s",
+                     len(skip), ", ".join(sorted(skip)))
+        return skip
+
+    def reanalyze(self):
+        """Ohitusasetus muuttui: listat ladataan ja analysoidaan uudelleen."""
+        self._built_sig = None
+        self.update_async()
 
     def _remove_stale_files(self):
         """Poistaa poistettujen listojen tiedostot ja niiden välimuistit."""
