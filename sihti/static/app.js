@@ -171,8 +171,7 @@ function renderKpis() {
 
   const loading = s.lists_updating && !s.domains_on_lists;
   $("#k-lists").textContent = loading ? "ladataan…" : fmt.format(s.domains_on_lists);
-  const extra = loading ? [] : [plural(s.lists_enabled, "lista", "listaa") + " käytössä"];
-  if (!loading && s.lists_skipped) extra.push(plural(s.lists_skipped, "päällekkäinen ohitettu", "päällekkäistä ohitettu"));
+  const extra = [];
   if (s.custom_deny) extra.push(plural(s.custom_deny, "oma esto", "omaa estoa"));
   if (s.custom_regex) extra.push(plural(s.custom_regex, "lauseke", "lauseketta"));
   if (s.lists_updating) extra.push(progressText(s.lists_progress));
