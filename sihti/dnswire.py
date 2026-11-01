@@ -132,6 +132,29 @@ def truncated(query, question_end, resp, edns_size):
     return header + query[12:question_end] + opt
 
 
+def cname_targets(data):
+    """Vastauksen CNAME-tietueiden kohdenimet. Piilotettu seurain näkyy sivuston omana
+    aliverkkotunnuksena, joka osoittaa (CNAME) seurantapalvelimen nimeen."""
+    try:
+        qd, an = struct.unpack("!HH", data[4:8])
+        if not an:
+            return []
+        off = 12
+        for _ in range(qd):
+            _, off = _read_name(data, off)
+            off += 4
+        out = []
+        for _ in range(an):
+            _, off = _read_name(data, off)
+            rtype, _cls, _ttl, rdlen = struct.unpack("!HHIH", data[off:off + 10])
+            if rtype == 5:
+                out.append(_read_name(data, off + 10)[0])
+            off += 10 + rdlen
+        return out
+    except (ParseError, struct.error, IndexError):
+        return []
+
+
 def rcode(data):
     return data[3] & 0x0F if len(data) >= 4 else RCODE_SERVFAIL
 

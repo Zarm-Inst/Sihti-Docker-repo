@@ -20,6 +20,13 @@ DEFAULTS = {
     ],
     "update_interval_hours": 24,
     "skip_redundant_lists": True,  # ohita listat, joiden kaikki nimet ovat muilla listoilla (tarkistus viikoittain)
+    "local_clients_only": True,    # vastaa vain lähiverkon laitteille (ei avointa DNS-palvelinta internetiin)
+    "allowed_networks": [],        # lisäksi sallitut verkot, esim. ["203.0.113.0/24", "2001:db8::/48"]
+    "block_dns_bypass": True,      # Firefoxin oma DNS ja iCloud Private Relay pois (niiden testinimet -> NXDOMAIN)
+    "block_cname": True,           # estä myös nimet, jotka osoittavat (CNAME) estettyyn nimeen
+    "local_dns": "",               # reititin paikallisille nimille, esim. "192.168.1.1" (tyhjä = ei käytössä)
+    "local_domains": ["lan", "home", "home.arpa", "internal", "localdomain"],
+    "dns_listen_ipv6": True,       # kuuntele myös IPv6:ta, kun dns_listen on 0.0.0.0 (jos verkko tukee)
     "password_hash": "",           # tyhjä = ei salasanaa
     "random_password": False,      # uusi satunnainen salasana jokaisella käynnistyksellä (Docker: päällä)
     "https": True,                 # käyttöliittymä HTTPS:llä (http-osoitteet ohjataan https:ään)

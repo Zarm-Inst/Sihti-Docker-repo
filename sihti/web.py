@@ -1,6 +1,7 @@
 """Web-käyttöliittymä ja JSON-rajapinta (http.server, ei ulkoisia riippuvuuksia)."""
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -19,6 +20,13 @@ from .filtering import normalize_domain
 log = logging.getLogger("sihti.web")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 SESSION_TTL = 7 * 86400
+# Käyttöliittymästä muutettavat asetukset; samat tallentuvat varmuuskopioon. Verkko-, portti-,
+# salasana- ja varmenneasetukset eivät kuulu tähän, jotta palautus toiselle laitteelle ei lukitse.
+SETTINGS_KEYS = ("upstreams", "block_mode", "log_retention_days", "log_queries", "cache_size",
+                 "update_interval_hours", "skip_redundant_lists", "local_clients_only", "allowed_networks",
+                 "block_dns_bypass", "block_cname", "local_dns", "local_domains")
+_BOOL_SETTINGS = ("log_queries", "skip_redundant_lists", "local_clients_only", "block_dns_bypass", "block_cname")
+BACKUP_VERSION = 1
 
 
 def ui_version():
@@ -200,28 +208,20 @@ class App:
             return {"ok": True, "running": True}
 
         if path == "/api/settings":
-            keys = ("upstreams", "block_mode", "log_retention_days", "log_queries",
-                    "cache_size", "update_interval_hours", "skip_redundant_lists")
             if method == "POST":
-                changes = {k: body[k] for k in keys if k in body}
-                if "skip_redundant_lists" in changes:
-                    changes["skip_redundant_lists"] = bool(changes["skip_redundant_lists"])
-                reanalyze = changes.get("skip_redundant_lists", self.config["skip_redundant_lists"]) \
-                    != self.config["skip_redundant_lists"]
-                if "upstreams" in changes:
-                    ups = [u.strip() for u in changes["upstreams"] if u.strip()]
-                    if not ups:
-                        raise ValueError("vähintään yksi ylävirtapalvelin tarvitaan")
-                    changes["upstreams"] = ups
-                if changes.get("block_mode", "null") not in ("null", "nxdomain"):
-                    raise ValueError("tuntematon estotapa")
-                self.config.update(**changes)
-                self.resolver.cache.size = self.config["cache_size"]
-                self.resolver.cache.clear()
-                if reanalyze:
-                    f.reanalyze()
-            return {k: self.config[k] for k in keys} | {"has_password": self.auth_required(),
-                                                         "random_password": bool(self.config["random_password"])}
+                self.apply_settings(body)
+            return {k: self.config[k] for k in SETTINGS_KEYS} | {"has_password": self.auth_required(),
+                                                                  "random_password": bool(self.config["random_password"])}
+
+        if path == "/api/backup":
+            if method == "GET":   # asetukset, listat ja omat säännöt yhtenä tiedostona
+                return {"sihti_backup": BACKUP_VERSION, "created": time.time(),
+                        "settings": {k: self.config[k] for k in SETTINGS_KEYS},
+                        "lists": [dict(l) for l in self.config["lists"]],
+                        "custom": {"allow": sorted(f.allow), "deny": sorted(f.deny),
+                                   "deny_regex": [p for p, _ in f.deny_regex]}}
+            if method == "POST":
+                return self.restore_backup(body)
 
         if path == "/api/tls" and method == "GET":
             if not self.certs:
@@ -240,6 +240,69 @@ class App:
             return {"ok": True, "has_password": bool(pw)}
 
         return None
+
+    def apply_settings(self, body):
+        """Tarkistaa ja tallentaa asetukset (käyttöliittymä ja varmuuskopion palautus)."""
+        changes = {k: body[k] for k in SETTINGS_KEYS if k in body}
+        for k in _BOOL_SETTINGS:
+            if k in changes:
+                changes[k] = bool(changes[k])
+        if "upstreams" in changes:
+            ups = [str(u).strip() for u in changes["upstreams"] if str(u).strip()]
+            if not ups:
+                raise ValueError("vähintään yksi ylävirtapalvelin tarvitaan")
+            changes["upstreams"] = ups
+        if changes.get("block_mode", "null") not in ("null", "nxdomain"):
+            raise ValueError("tuntematon estotapa")
+        if "allowed_networks" in changes:
+            nets = [str(n).strip() for n in changes["allowed_networks"] if str(n).strip()]
+            for n in nets:
+                try:
+                    ipaddress.ip_network(n, strict=False)
+                except ValueError:
+                    raise ValueError(f"virheellinen verkko: {n}") from None
+            changes["allowed_networks"] = nets
+        if "local_dns" in changes:
+            server = str(changes["local_dns"] or "").strip()
+            if server:
+                host = server[1:].split("]")[0] if server.startswith("[") else \
+                    (server.rsplit(":", 1)[0] if server.count(":") == 1 else server)
+                try:
+                    ipaddress.ip_address(host)
+                except ValueError:
+                    raise ValueError("reitittimen osoitteen pitää olla IP-osoite, esim. 192.168.1.1") from None
+            changes["local_dns"] = server
+        if "local_domains" in changes:
+            changes["local_domains"] = [str(d).strip().strip(".").lower() for d in changes["local_domains"]
+                                        if str(d).strip().strip(".")]
+        reanalyze = "skip_redundant_lists" in changes and \
+            changes["skip_redundant_lists"] != self.config["skip_redundant_lists"]
+        self.config.update(**changes)
+        self.resolver.cache.size = self.config["cache_size"]
+        self.resolver.cache.clear()
+        if reanalyze:
+            self.filter.reanalyze()
+
+    def restore_backup(self, data):
+        """Palauttaa varmuuskopion: asetukset, estolistat ja omat säännöt korvataan sen sisällöllä."""
+        if not isinstance(data, dict) or data.get("sihti_backup") != BACKUP_VERSION:
+            raise ValueError("tiedosto ei ole Sihdin varmuuskopio")
+        lists = []
+        for l in data.get("lists") or []:
+            url = str(l.get("url", "")).strip() if isinstance(l, dict) else ""
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(f"virheellinen listan osoite: {url or l}")
+            if not any(x["url"] == url for x in lists):
+                lists.append({"url": url, "enabled": bool(l.get("enabled", True)), "keep": bool(l.get("keep", False))})
+        self.apply_settings(data.get("settings") or {})
+        custom = data.get("custom") or {}
+        skipped = self.filter.replace_custom(custom.get("allow") or [], custom.get("deny") or [],
+                                             custom.get("deny_regex") or [])
+        self.config.update(lists=lists)
+        self.filter.reanalyze()   # uudet listat ladataan ja joukko rakennetaan uudelleen
+        self.resolver.cache.clear()
+        return {"ok": True, "lists": len(lists), "skipped": skipped,
+                "rules": len(self.filter.allow) + len(self.filter.deny) + len(self.filter.deny_regex)}
 
 
 def make_handler(app):

@@ -10,6 +10,11 @@ Kirjoitettu pelkällä Pythonin standardikirjastolla: ei riippuvuuksia, ei tieto
 - Estolistat hosts-muodossa, pelkkinä nimilistoina tai `||nimi^` -muodossa; automaattinen päivitys. Vain muuttuneet listat ladataan ja käsitellään (ETag / Last-Modified ja sisällön tarkistus), muuttuneet rinnakkain, ja käsitellyt listat säilytetään välimuistissa, joten listan lisäys, poisto ja uudelleenkäynnistys ovat nopeita
 - Päällekkäiset estolistat ohitetaan automaattisesti: lista, jonka kaikki nimet ovat jo muilla käytössä olevilla listoilla, jätetään pois päivityksistä (sama nimi ei katoa estosta) ja tarkistetaan viikoittain uudelleen. Estolistat-sivu näyttää, montako nimeä kukin lista tuo vain itse; yksittäisen listan voi pitää aina käytössä
 - Omat sallitut ja estetyt verkkotunnukset (koskevat myös aliverkkotunnuksia) sekä säännölliset lausekkeet
+- Piilotettujen seurainten tunnistus: myös nimi, joka osoittaa (CNAME) estettyyn nimeen, estetään
+- Ohitusten esto: Firefoxin oma salattu DNS (DoH) ja iCloud Private Relay kytkeytyvät pois tässä verkossa, joten niitä käyttävät laitteet eivät ohita suodatusta
+- Vastaa vain lähiverkon laitteille, joten Pi ei toimi avoimena DNS-palvelimena, vaikka portti 53 aukeaisi vahingossa internetiin
+- Paikalliset nimet (esim. `nas.lan` tai pelkkä `nas`) ja lähiverkon käänteishaut kysytään reitittimeltä
+- Varmuuskopio: asetukset, estolistat ja omat säännöt yhtenä tiedostona, palautus käyttöliittymästä
 - Välimuisti, joka noudattaa vastausten TTL-arvoja
 - Kyselyloki SQLiteen, haku ja suodatus, estä/salli yhdellä napilla; jokaisen eston syy näkyy lokissa (mikä estolista, oma sääntö tai lauseke)
 - Yleiskuva: tilastoruudut läpäisseistä ja estetyistä kyselyistä (määrä, osuus ja eri verkkotunnukset), estolistojen nimien kokonaismäärä, vuorokauden kaavio, estetyimmät nimet ja aktiivisimmat laitteet
@@ -141,6 +146,7 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 | Avain | Oletus | Merkitys |
 |---|---|---|
 | `dns_listen`, `dns_port` | `0.0.0.0`, `53` | DNS-kuuntelija (IPv6: `"::"`) |
+| `dns_listen_ipv6` | `true` | Kuuntele myös IPv6:ta, kun `dns_listen` on `0.0.0.0` (jos laite tukee) |
 | `web_listen`, `web_port` | `0.0.0.0`, `4000` | Käyttöliittymä (vaihda, jos portti on varattu) |
 | `upstreams` | Cloudflare, Quad9 | Ylävirran palvelimet, kokeillaan järjestyksessä |
 | `block_mode` | `null` | `null` = 0.0.0.0 / ::, `nxdomain` = nimeä ei ole |
@@ -150,12 +156,22 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 | `lists` | yksi lista | Estolistojen osoitteet |
 | `update_interval_hours` | `24` | Listojen päivitysväli |
 | `skip_redundant_lists` | `true` | Ohita listat, joiden kaikki nimet ovat muilla listoilla (tarkistetaan viikoittain uudelleen) |
+| `block_cname` | `true` | Estä myös nimet, jotka osoittavat (CNAME) estettyyn nimeen |
+| `block_dns_bypass` | `true` | Firefoxin oma DNS ja iCloud Private Relay pois (niiden testinimiin vastataan "ei ole") |
+| `local_clients_only` | `true` | Vastaa vain lähiverkon osoitteille (yksityiset IPv4-verkot, IPv6:n paikalliset osoitteet ja koneen omat IPv6-verkot) |
+| `allowed_networks` | `[]` | Lisäksi sallitut verkot, esim. `["203.0.113.0/24"]` |
+| `local_dns` | tyhjä | Reititin paikallisille nimille, esim. `192.168.1.1` |
+| `local_domains` | `lan`, `home`, `home.arpa`, `internal`, `localdomain` | Paikalliset verkkotunnukset, jotka kysytään reitittimeltä |
 | `https` | `true` | HTTPS käyttöliittymään (`false` = pelkkä HTTP) |
 | `random_password` | `false` (Dockerissa `true`) | Uusi satunnainen salasana jokaisella käynnistyksellä, tulostuu lokiin |
 | `tls_extra_names` | `[]` | Lisänimet ja -osoitteet varmenteeseen |
 | `tls_learn_names` | `true` | Lisää käyttöliittymän avaamiseen käytetty lähiverkko-osoite tai paikallinen nimi varmenteeseen |
 | `tls_ca_cert`, `tls_ca_key` | tyhjä | Yhteinen varmentaja usealle laitteelle; tyhjä = laite luo oman |
 | `tls_cert`, `tls_key` | tyhjä | Oma varmenne; tyhjä = luodaan automaattisesti |
+
+### IPv6
+
+Sihti kuuntelee myös IPv6:ta, jos laite tukee sitä. Jos reititin jakaa laitteille IPv6:n kautta oman DNS-palvelimensa, laitteet voivat kysyä sitä ja ohittaa Sihdin. Aseta silloin reitittimen IPv6-asetuksissa (DHCPv6 tai RA/RDNSS) DNS-palvelimeksi Pi:n IPv6-osoite tai kytke reitittimen oma IPv6-DNS pois. Pi:n osoitteen näkee komennolla `ip -6 addr`. Dockerissa IPv6-kyselyt kulkevat julkaistun portin kautta kontille; jos Dockerin oma IPv6-verkko on käytössä ja laitteita torjutaan (lokissa "kysely torjuttu"), lisää kotiverkon IPv6-verkko asetukseen `allowed_networks`.
 
 ## Komentorivi
 

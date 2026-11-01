@@ -5,7 +5,8 @@ const $ = (s) => document.querySelector(s);
 const fmt = new Intl.NumberFormat("fi-FI");
 const pctFmt = new Intl.NumberFormat("fi-FI", { style: "percent", maximumFractionDigits: 1 });
 const STATUS_LABEL = { estetty: "Estetty", sallittu: "Sallittu", valimuisti: "Välimuisti", virhe: "Virhe" };
-const REASON_LABEL = { lista: "Estolista", oma: "Oma esto", lauseke: "Lauseke", sallinta: "Oma sallinta", "ylävirta": "Ylävirta ei vastannut" };
+const REASON_LABEL = { lista: "Estolista", oma: "Oma esto", lauseke: "Lauseke", sallinta: "Oma sallinta",
+  "ylävirta": "Ylävirta ei vastannut", ohitus: "Ohituksen esto", cname: "Piilotettu seurain (CNAME)", paikallinen: "Paikallinen nimi, reititin" };
 
 // Lyhyt nimi listan osoitteesta: raw.githubusercontent.com/StevenBlack/hosts/master/hosts -> StevenBlack/hosts
 function listName(url) {
@@ -460,6 +461,12 @@ async function loadSettings() {
   $("#s-interval").value = s.update_interval_hours;
   $("#s-log").checked = s.log_queries;
   $("#s-skip").checked = s.skip_redundant_lists;
+  $("#s-bypass").checked = s.block_dns_bypass;
+  $("#s-cname").checked = s.block_cname;
+  $("#s-local-only").checked = s.local_clients_only;
+  $("#s-networks").value = s.allowed_networks.join("\n");
+  $("#s-local-dns").value = s.local_dns;
+  $("#s-local-domains").value = s.local_domains.join(", ");
   loadTls();
   const randomPw = !!s.random_password;
   $("#pw-new").hidden = randomPw;
@@ -510,6 +517,12 @@ $("#settings").addEventListener("submit", async (e) => {
       update_interval_hours: Number($("#s-interval").value),
       log_queries: $("#s-log").checked,
       skip_redundant_lists: $("#s-skip").checked,
+      block_dns_bypass: $("#s-bypass").checked,
+      block_cname: $("#s-cname").checked,
+      local_clients_only: $("#s-local-only").checked,
+      allowed_networks: $("#s-networks").value.split("\n"),
+      local_dns: $("#s-local-dns").value,
+      local_domains: $("#s-local-domains").value.split(/[\s,]+/),
     } });
     flash($("#settings-msg"), "Asetukset tallennettu.");
   } catch (err) { flash($("#settings-msg"), err.message); }
@@ -521,6 +534,24 @@ $("#pw-form").addEventListener("submit", async (e) => {
   if (r.has_password) { location.reload(); return; }
   flash($("#pw-msg"), "Salasana poistettu.");
   loadSettings();
+});
+// Varmuuskopio: asetukset, estolistat ja omat säännöt yhtenä tiedostona
+$("#backup-save").addEventListener("click", async () => {
+  const data = await api("/api/backup");
+  const a = el("a", { href: URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })),
+    download: `sihti-varmuuskopio-${new Date().toISOString().slice(0, 10)}.json` });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+$("#backup-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file || !confirm("Palautetaanko varmuuskopio? Nykyiset asetukset, estolistat ja omat säännöt korvataan sen sisällöllä.")) return;
+  try {
+    const r = await api("/api/backup", { method: "POST", body: JSON.parse(await file.text()) });
+    flash($("#maint-msg"), `Palautettu: ${r.lists} listaa, ${r.rules} omaa sääntöä` + (r.skipped.length ? `, ohitettiin ${r.skipped.length} virheellistä` : "") + ". Listat päivitetään taustalla.");
+    loadSettings();
+  } catch (err) { flash($("#maint-msg"), err instanceof SyntaxError ? "Tiedosto ei ole kelvollinen varmuuskopio." : err.message); }
 });
 $("#clear-cache").addEventListener("click", async () => { await api("/api/cache/clear", { method: "POST" }); flash($("#maint-msg"), "Välimuisti tyhjennetty."); });
 $("#clear-log").addEventListener("click", async () => {

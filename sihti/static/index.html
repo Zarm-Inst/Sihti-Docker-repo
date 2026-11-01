@@ -170,6 +170,26 @@
           <label class="check"><input id="s-skip" type="checkbox"> Ohita listat, joiden kaikki nimet ovat jo muilla listoilla</label>
           <p class="hint">Nopeuttaa listojen päivitystä. Ohitetut listat tarkistetaan viikoittain ja otetaan automaattisesti takaisin käyttöön, jos niihin tulee nimiä, joita muilla listoilla ei ole. Yksittäisen listan voi pitää aina käytössä Estolistat-sivulta.</p>
         </fieldset>
+        <fieldset>
+          <legend>Suojaus</legend>
+          <label class="check"><input id="s-bypass" type="checkbox"> Estä Firefoxin oma DNS ja iCloud Private Relay</label>
+          <p class="hint">Muuten Firefox ja Apple-laitteet voivat ohittaa tämän verkon suodatuksen. Apple-laitteet ilmoittavat, että verkko on kytkenyt Private Relayn pois.</p>
+          <label class="check"><input id="s-cname" type="checkbox"> Tunnista piilotetut seurantapalvelimet</label>
+          <p class="hint">Estää myös nimet, jotka osoittavat (CNAME) estettyyn nimeen, esim. sivuston oman aliverkkotunnuksen taakse piilotetun seurannan.</p>
+          <label class="check"><input id="s-local-only" type="checkbox"> Vastaa vain lähiverkon laitteille</label>
+          <p class="hint">Sihti ei toimi avoimena DNS-palvelimena, vaikka portti 53 aukeaisi vahingossa internetiin. Lähiverkon IPv4- ja IPv6-osoitteet sallitaan automaattisesti.</p>
+          <div class="grid2">
+            <label>Lisäksi sallitut verkot (esim. VPN), yksi per rivi<textarea id="s-networks" rows="2" placeholder="203.0.113.0/24"></textarea></label>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Paikalliset nimet</legend>
+          <p class="hint">Lähiverkon laitteiden nimet (esim. <code>nas.lan</code> tai pelkkä <code>nas</code>) ja lähiverkon osoitteiden käänteishaut kysytään reitittimeltä eikä internetistä. Jätä osoite tyhjäksi, jos et käytä laitteiden nimiä.</p>
+          <div class="grid2">
+            <label>Reitittimen osoite<input id="s-local-dns" placeholder="esim. 192.168.1.1"></label>
+            <label>Paikalliset verkkotunnukset<input id="s-local-domains" placeholder="lan, home"></label>
+          </div>
+        </fieldset>
         <button class="btn primary">Tallenna asetukset</button>
         <span id="settings-msg" class="msg" aria-live="polite"></span>
       </form>
@@ -202,6 +222,9 @@
 
       <div class="settings danger">
         <h2>Huolto</h2>
+        <button id="backup-save" class="btn">Lataa varmuuskopio</button>
+        <label class="btn" for="backup-file">Palauta varmuuskopio</label>
+        <input id="backup-file" type="file" accept=".json,application/json" hidden>
         <button id="clear-cache" class="btn">Tyhjennä välimuisti</button>
         <button id="clear-log" class="btn warn">Poista kyselyloki</button>
         <button id="logout" class="btn" hidden>Kirjaudu ulos</button>

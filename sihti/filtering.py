@@ -471,6 +471,30 @@ class Filter:
             raise ValueError("ei kelvollisia arvoja: " + ", ".join(result["invalid"][:5]))
         return result
 
+    def replace_custom(self, allow, deny, deny_regex):
+        """Korvaa kaikki omat säännöt (varmuuskopion palautus). Palauttaa ohitetut virheelliset arvot."""
+        skipped = []
+
+        def names(values):
+            out = set()
+            for v in values:
+                n = normalize_domain(str(v))
+                if n:
+                    out.add(n)
+                else:
+                    skipped.append(str(v))
+            return out
+        regex = []
+        for p in deny_regex:
+            try:
+                regex.append((str(p), re.compile(str(p))))
+            except re.error:
+                skipped.append(str(p))
+        with self._lock:
+            self.allow, self.deny, self.deny_regex = names(allow), names(deny), regex
+            self._save_custom()
+        return skipped
+
     def remove_custom(self, kind, value):
         with self._lock:
             if kind == "deny_regex":

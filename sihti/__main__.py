@@ -74,7 +74,7 @@ def main():
 
     threading.Thread(target=qlog.writer_loop, args=(stop,), daemon=True, name="loki").start()
     threading.Thread(target=filt.updater_loop, args=(stop,), daemon=True, name="listat").start()
-    servers = start_servers(resolver, config["dns_listen"], config["dns_port"])
+    servers = start_servers(resolver, config["dns_listen"], config["dns_port"], ipv6=config["dns_listen_ipv6"])
     certs, tls_ctx = None, None
     if config["https"]:
         try:

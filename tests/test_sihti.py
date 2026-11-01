@@ -17,7 +17,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from sihti import dnswire as w                          # noqa: E402
-from sihti.config import Config, env_overrides          # noqa: E402
+from sihti.config import DEFAULTS, Config, env_overrides  # noqa: E402
 from sihti.filtering import Filter, normalize_domain, parse_list  # noqa: E402
 from sihti.querylog import QueryLog                     # noqa: E402
 from sihti.resolver import Resolver, start_servers     # noqa: E402
@@ -77,8 +77,14 @@ class FakeUpstream(threading.Thread):
             except OSError:
                 return
             self.count += 1
-            _qid, _f, _name, qtype, qend = w.parse_query(data)
-            if qtype == 1:
+            _qid, _f, name, qtype, qend = w.parse_query(data)
+            if name.startswith("piilo."):   # sivuston oma nimi, joka osoittaa seurantapalvelimeen
+                target = b"".join(bytes([len(p)]) + p.encode() for p in "tracker.example.net".split(".")) + b"\0"
+                resp = w.build_response(data, qend)
+                resp = resp[:6] + struct.pack("!H", 2) + resp[8:]
+                resp += struct.pack("!HHHIH", 0xC00C, 5, 1, 300, len(target)) + target
+                resp += target + struct.pack("!HHIH", 1, 1, 300, 4) + bytes([5, 6, 7, 8])
+            elif qtype == 1:
                 resp = w.build_response(data, qend, answer_rdata=bytes([1, 2, 3, 4]), qtype=1, ttl=300)
             else:
                 resp = w.build_response(data, qend)
@@ -292,6 +298,16 @@ class TestDnsWire(unittest.TestCase):
         self.assertTrue(tc[2] & 0x02)
         self.assertEqual(struct.unpack("!HHHH", tc[4:12]), (1, 0, 0, 1))
         self.assertEqual(w.query_edns(tc, qend)[0], 1232)
+
+    def test_cname_targets(self):
+        q = make_query("www.example.com")
+        qend = w.parse_query(q)[4]
+        target = b"\x03cdn\x07example\x03net\x00"
+        r = w.build_response(q, qend)
+        r = r[:6] + struct.pack("!H", 1) + r[8:] + struct.pack("!HHHIH", 0xC00C, 5, 1, 60, len(target)) + target
+        self.assertEqual(w.cname_targets(r), ["cdn.example.net"])
+        self.assertEqual(w.cname_targets(w.build_response(q, qend, answer_rdata=b"\1\2\3\4", qtype=1)), [])
+        self.assertEqual(w.cname_targets(b"\0" * 5), [])
 
     def test_udp_reply_fits_client_size(self):
         from sihti.resolver import _fit_udp
@@ -508,6 +524,92 @@ class TestListUpdates(unittest.TestCase):
         upd.assert_called_once_with(True)
 
 
+class TestBackup(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        path = os.path.join(self.dir, "sihti.json")
+        with open(path, "w") as f:
+            json.dump({"data_dir": self.dir, "lists": [{"url": "https://lista.example/a.txt", "enabled": True}]}, f)
+        self.cfg = Config(path)
+        self.filt = Filter(self.cfg)
+        patcher = mock.patch.object(self.filt, "reanalyze")   # ei latauksia taustalla
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        qlog = QueryLog(self.cfg)
+        self.app = App(self.cfg, self.filt, qlog, Resolver(self.cfg, self.filt, qlog))
+
+    def test_roundtrip(self):
+        self.filt.add_custom("deny", "oma.example.com")
+        self.filt.add_custom("deny_regex", "^seuranta")
+        self.app.apply_settings({"local_dns": "192.168.1.1", "block_cname": False})
+        backup = json.loads(json.dumps(self.app.api("GET", "/api/backup", {}, {})))
+        self.assertNotIn("password_hash", backup["settings"])
+
+        # Toinen laite / uusi asennus: kaikki toisin
+        self.cfg.update(lists=[], local_dns="", block_cname=True)
+        self.filt.replace_custom([], [], [])
+        r = self.app.api("POST", "/api/backup", {}, backup)
+        self.assertEqual((r["lists"], r["rules"], r["skipped"]), (1, 2, []))
+        self.assertEqual(self.cfg["lists"][0]["url"], "https://lista.example/a.txt")
+        self.assertEqual((self.cfg["local_dns"], self.cfg["block_cname"]), ("192.168.1.1", False))
+        self.assertEqual(self.filt.deny, {"oma.example.com"})
+        self.assertTrue(self.filt.check("seuranta.example.org")[0])
+        self.filt.reanalyze.assert_called()
+
+    def test_invalid_backup_changes_nothing(self):
+        for bad in ({"jotain": 1}, {"sihti_backup": 1, "lists": [{"url": "ftp://x"}]},
+                    {"sihti_backup": 1, "settings": {"allowed_networks": ["ei verkko"]}},
+                    {"sihti_backup": 1, "settings": {"local_dns": "reititin.lan"}}):
+            with self.assertRaises(ValueError):
+                self.app.restore_backup(bad)
+        self.assertEqual(len(self.cfg["lists"]), 1)
+        self.assertEqual(self.cfg["allowed_networks"], [])
+
+
+def _ipv6_available():
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+class TestIPv6(unittest.TestCase):
+    @unittest.skipUnless(_ipv6_available(), "ei IPv6:ta tässä ympäristössä")
+    def test_dual_stack(self):
+        class Echo:
+            def handle(self, data, client, tcp=False):
+                qend = w.parse_query(data)[4]
+                return w.build_response(data, qend, answer_rdata=bytes([9, 9, 9, 9]), qtype=1)
+        port = free_port(socket.SOCK_DGRAM)
+        servers = start_servers(Echo(), "0.0.0.0", port, ipv6=True)
+        self.addCleanup(lambda: [(s.shutdown(), s.server_close()) for s in servers])
+        self.assertEqual(len(servers), 4)
+        for host, fam in (("127.0.0.1", socket.AF_INET), ("::1", socket.AF_INET6)):
+            msg = make_query("a.example.org")
+            with socket.socket(fam, socket.SOCK_DGRAM) as s:
+                s.settimeout(3)
+                s.sendto(msg, (host, port))
+                self.assertEqual(answer_ip(s.recv(512)), "9.9.9.9", host)
+
+    def test_falls_back_to_ipv4(self):
+        from unittest import mock
+        import sihti.resolver as R
+        real = R._bind
+
+        def no_ipv6(resolver, host, port, v6only=False):
+            if host == "::":
+                raise OSError(97, "Address family not supported by protocol")
+            return real(resolver, host, port, v6only)
+        with mock.patch.object(R, "_bind", side_effect=no_ipv6):
+            servers = start_servers(object(), "0.0.0.0", free_port(socket.SOCK_DGRAM), ipv6=True)
+        self.addCleanup(lambda: [(s.shutdown(), s.server_close()) for s in servers])
+        self.assertEqual(len(servers), 2)
+
+
 class TestQueryLogMigration(unittest.TestCase):
     def test_old_database_gets_detail_column(self):
         import sqlite3
@@ -611,8 +713,8 @@ class TestService(unittest.TestCase):
         silent = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)   # ottaa vastaan, ei vastaa
         silent.bind(("127.0.0.1", 0))
         self.addCleanup(silent.close)
-        cfg = {"upstreams": [f"127.0.0.1:{silent.getsockname()[1]}", f"127.0.0.1:{self.up.port}"],
-               "upstream_timeout": 0.5, "cache_size": 0, "block_mode": "null"}
+        cfg = {**DEFAULTS, "upstreams": [f"127.0.0.1:{silent.getsockname()[1]}", f"127.0.0.1:{self.up.port}"],
+               "upstream_timeout": 0.5, "cache_size": 0}
         res = Resolver(cfg, self.filt, self.qlog)
         times = []
         for i in range(3):
@@ -621,6 +723,61 @@ class TestService(unittest.TestCase):
             times.append(time.monotonic() - t)
         self.assertGreaterEqual(times[0], 0.5)
         self.assertLess(max(times[1:]), 0.2, "vastaamaton ylävirta pitää kokeilla viimeisenä")
+
+    def _resolver(self, **cfg):
+        return Resolver({**DEFAULTS, "upstreams": [f"127.0.0.1:{self.up.port}"], "cache_size": 100, **cfg},
+                        self.filt, self.qlog)
+
+    def test_bypass_test_names_answered_nxdomain(self):
+        before = self.up.count
+        for name in ("use-application-dns.net", "mask.icloud.com", "mask-h2.icloud.com"):
+            self.assertEqual(udp_ask(self.dns_port, name)[3] & 0x0F, w.RCODE_NXDOMAIN, name)
+        self.assertEqual(self.up.count, before, "testinimiä ei kysytä internetistä")
+        res = self._resolver(block_dns_bypass=False)
+        self.assertEqual(answer_ip(res.handle(make_query("mask.icloud.com"), "127.0.0.1")), "1.2.3.4")
+        self.api("/api/custom", "POST", {"kind": "allow", "value": "mask-h2.icloud.com"})   # oma sallinta voittaa
+        self.assertEqual(answer_ip(udp_ask(self.dns_port, "mask-h2.icloud.com")), "1.2.3.4")
+
+    def test_only_local_clients_answered(self):
+        from unittest import mock
+        import sihti.resolver as R
+        res = self._resolver(allowed_networks=["8.8.4.0/24"])
+        q = make_query("a.example.org")
+        for client in ("192.168.1.20", "10.0.0.3", "172.20.1.1", "127.0.0.1", "fd00::20", "fe80::1%eth0",
+                       "100.64.1.2", "::ffff:192.168.1.20", "8.8.4.4"):
+            self.assertEqual(answer_ip(res.handle(q, client)), "1.2.3.4", client)
+        with self.assertLogs("sihti.dns", "WARNING"):
+            for client in ("8.8.8.8", "2a00:1450:4001::1", "::ffff:8.8.8.8"):
+                self.assertEqual(res.handle(q, client)[3] & 0x0F, w.RCODE_REFUSED, client)
+        # Kotiverkon julkinen IPv6-osoite kelpaa, kun se on koneen omassa verkossa
+        with mock.patch.object(R, "_own_ipv6_networks",
+                               return_value=[__import__("ipaddress").ip_network("2a00:1450:4001::/48")]):
+            res2 = self._resolver()
+            self.assertEqual(answer_ip(res2.handle(q, "2a00:1450:4001::1")), "1.2.3.4")
+        self.assertEqual(answer_ip(self._resolver(local_clients_only=False).handle(q, "8.8.8.8")), "1.2.3.4")
+
+    def test_cname_to_blocked_name_is_blocked(self):
+        for _ in range(2):   # myös välimuistista
+            self.assertEqual(answer_ip(udp_ask(self.dns_port, "piilo.uutiset.example.org")), "0.0.0.0")
+        time.sleep(1.5)
+        row = self.api("/api/log?search=piilo.uutiset.example.org")[0]
+        self.assertEqual((row["status"], row["reason"], row["detail"]), ("estetty", "cname", "tracker.example.net"))
+        res = self._resolver(block_cname=False)
+        self.assertEqual(answer_ip(res.handle(make_query("piilo.toinen.example.org"), "127.0.0.1")), "5.6.7.8")
+
+    def test_local_names_go_to_router(self):
+        router = FakeUpstream()
+        router.start()
+        self.addCleanup(router.sock.close)
+        res = self._resolver(local_dns=f"127.0.0.1:{router.port}", cache_size=0)
+        before = self.up.count
+        for name, qtype in (("nas.lan", 1), ("nas", 1), ("tulostin.home.arpa", 1), ("20.1.168.192.in-addr.arpa", 12),
+                            ("5.0.0.10.in-addr.arpa", 12), ("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa", 12)):
+            res.handle(make_query(name, qtype), "127.0.0.1")
+        self.assertEqual((router.count, self.up.count - before), (6, 0))
+        res.handle(make_query("www.example.org"), "127.0.0.1")
+        res.handle(make_query("8.8.8.8.in-addr.arpa", 12), "127.0.0.1")
+        self.assertEqual((router.count, self.up.count - before), (6, 2))
 
     def test_blocked_udp_tcp_ipv6(self):
         self.assertEqual(answer_ip(udp_ask(self.dns_port, "ads.example.com")), "0.0.0.0")
