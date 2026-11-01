@@ -394,7 +394,8 @@ async function loadLists(data, state) {
   if (waiting) parts.push(`${waiting} ei vielä käytössä`);
   const rows = used.reduce((s, l) => s + (l.count || 0), 0);
   listBase = `${lists.length} listaa: ${parts.join(", ")}. Käytössä olevilla listoilla yhteensä ${fmt.format(rows)} nimeä`
-    + (status?.domains_on_lists ? `, joista ${fmt.format(status.domains_on_lists)} eri nimeä (sama nimi useammalla listalla on estossa vain kerran)` : "") + ".";
+    + (status?.domains_on_lists ? `, joista ${fmt.format(status.domains_on_lists)} eri nimeä (sama nimi useammalla listalla on estossa vain kerran)` : "") + "."
+    + (status?.next_update ? ` Seuraava automaattinen päivitys ${dateFmt(Math.max(status.next_update, Date.now() / 1000))}.` : "");
   if (state) listState = state;   // juuri haettu tila muutoksen jälkeen
   else if (!listWait) listState = listStateFrom(status) || listState;   // näkymään tultaessa
   renderListState();

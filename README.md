@@ -154,7 +154,7 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 | `log_retention_days` | `7` | Kyselylokin säilytysaika |
 | `log_queries` | `true` | Kyselylokin tallennus (pois = parempi yksityisyys) |
 | `lists` | yksi lista | Estolistojen osoitteet |
-| `update_interval_hours` | `24` | Listojen päivitysväli |
+| `update_interval_hours` | `24` | Listojen päivitysväli. Lasketaan viimeisimmästä päivityksestä, joka säilyy uudelleenkäynnistyksen yli; muutos tulee voimaan heti. Epäonnistunut päivitys yritetään uudelleen tunnin päästä |
 | `skip_redundant_lists` | `true` | Ohita listat, joiden kaikki nimet ovat muilla listoilla (tarkistetaan viikoittain uudelleen) |
 | `block_cname` | `true` | Estä myös nimet, jotka osoittavat (CNAME) estettyyn nimeen |
 | `block_dns_bypass` | `true` | Firefoxin oma DNS ja iCloud Private Relay pois (niiden testinimiin vastataan "ei ole") |

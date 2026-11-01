@@ -283,6 +283,7 @@ BUILD_WORKERS = 2        # muuttuneet listat jäsennetään rinnakkain; maltilli
 BUILD_TIMEOUT = 3600    # s; jumiutunut käsittely keskeytetään, jotta päivitys ei jää päälle
 DOWNLOAD_TIMEOUT = 900  # s; yhden listan lataus kokonaisuudessaan
 REDUNDANT_RECHECK = 7 * 86400   # s; päällekkäisenä ohitettu lista tarkistetaan uudelleen viikon päästä
+UPDATE_RETRY = 3600     # s; epäonnistunut päivitys yritetään uudelleen tunnin päästä
 
 
 def _build_workers(n_lists):
@@ -390,7 +391,9 @@ class Filter:
         self.deny = set()         # estetään + kaikki aliverkkotunnukset
         self.deny_regex = []      # [(pattern_str, compiled)]
         self.list_status = {}     # url -> {"count", "updated", "error"}
-        self.last_update = None
+        self._schedule_path = os.path.join(self.lists_dir, "ajastus.json")
+        self.last_update = self._load_last_update()   # viimeisin täysi päivitys (säilyy uudelleenkäynnistyksessä)
+        self._retry_at = None
         self.pause_until = None
         self._key = self._load_key()
         self._meta_path = os.path.join(self.lists_dir, "tila.json")
@@ -648,10 +651,11 @@ class Filter:
             self._active += 1
         try:
             with self._update_lock:
-                urls = [e["url"] for e in self.config["lists"]
-                        if e.get("enabled", True) and not self.skipped_until(e)]
-                if missing_only:
-                    urls = [u for u in urls if not os.path.exists(self._list_file(u))]
+                all_urls = [e["url"] for e in self.config["lists"]
+                            if e.get("enabled", True) and not self.skipped_until(e)]
+                urls = [u for u in all_urls if not os.path.exists(self._list_file(u))] if missing_only else all_urls
+                # Ensimmäisellä käynnistyksellä kaikki listat puuttuvat: lataus on täysi päivitys
+                full = not missing_only or (bool(urls) and len(urls) == len(all_urls))
                 try:
                     if urls:
                         self._progress = {"phase": "lataus", "done": 0, "total": len(urls), "since": time.time()}
@@ -659,8 +663,11 @@ class Filter:
                             for _ in ex.map(self._download, urls):
                                 self._progress["done"] += 1
                     self.rebuild()
-                    if not missing_only:
+                    if full:
+                        failed = [u for u in urls if self.list_status.get(u, {}).get("error")]
+                        self._retry_at = time.time() + UPDATE_RETRY if failed else None
                         self.last_update = time.time()
+                        self._save_last_update()
                 finally:
                     self._progress = None
         finally:
@@ -703,8 +710,8 @@ class Filter:
                 sig.append((url, fs.st_size, fs.st_mtime_ns))
                 if st.get("updated") is None:
                     st["updated"] = fs.st_mtime
-                # Uudelleenkäynnistyksen jälkeen päivitysaika luetaan tallennetuista tiedostoista
-                if self.last_update is None or st["updated"] > self.last_update:
+                # Vanhasta versiosta päivitettäessä aikaa ei ole tallessa: arvioidaan tiedostoista
+                if self.last_update is None or (not os.path.exists(self._schedule_path) and st["updated"] > self.last_update):
                     self.last_update = st["updated"]
             sig = tuple(sig)
             if sig == self._built_sig:
@@ -790,15 +797,43 @@ class Filter:
                 except OSError:
                     pass
 
+    def _load_last_update(self):
+        try:
+            with open(self._schedule_path, encoding="utf-8") as f:
+                return float(json.load(f)["last_update"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _save_last_update(self):
+        tmp = self._schedule_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"last_update": self.last_update}, f)
+        os.replace(tmp, self._schedule_path)
+
+    def next_update(self):
+        """Seuraavan automaattisen päivityksen aika: viimeisimmästä täydestä päivityksestä
+        asetuksen välein, epäonnistuneen jälkeen tunnin päästä, ja heti, jos aikaa ei tiedetä."""
+        if self._retry_at:
+            return self._retry_at
+        if self.last_update is None:
+            return time.time()
+        return self.last_update + max(1, self.config["update_interval_hours"]) * 3600
+
+    def _scheduled_update(self, missing_only):
+        try:
+            self.update_lists(missing_only)
+        except Exception:  # noqa: BLE001 — yritetään uudelleen tunnin päästä
+            self._retry_at = time.time() + UPDATE_RETRY
+            log.exception("listojen päivitys epäonnistui")
+
     def updater_loop(self, stop_event):
-        # Tallennetut listat ensin (välimuistista nopeasti); puuttuvat, esim. ensimmäisellä
-        # käynnistyksellä kaikki, ladataan heti
-        missing_only = True
+        """Käynnistyksessä tallennetut listat otetaan käyttöön välimuistista ja puuttuvat ladataan.
+        Sen jälkeen tarkistetaan minuutin välein, onko päivitys ajankohtainen. Aika lasketaan
+        levylle tallennetusta viimeisimmästä päivityksestä, joten uudelleenkäynnistys ei siirrä
+        päivitystä ja päivitysvälin muutos tulee voimaan heti."""
+        self._scheduled_update(missing_only=True)
         while True:
-            try:
-                self.update_lists(missing_only)
-            except Exception:  # noqa: BLE001 — seuraava ajastettu päivitys yrittää uudelleen
-                log.exception("listojen päivitys epäonnistui")
-            missing_only = False
-            if stop_event.wait(max(1, self.config["update_interval_hours"]) * 3600):
+            if time.time() >= self.next_update():
+                self._scheduled_update(missing_only=False)
+            if stop_event.wait(60):
                 return

@@ -115,6 +115,7 @@ class App:
                 "build_error": f.build_error,
                 "cache_entries": len(self.resolver.cache),
                 "last_update": f.last_update,
+                "next_update": f.next_update(),
                 "uptime": time.time() - self.qlog.started,
             }
         if path == "/api/timeline" and method == "GET":
@@ -202,7 +203,7 @@ class App:
             active, skipped = f.list_counts()
             return {"updating": f.updating, "progress": f.progress(), "build_error": f.build_error,
                     "domains_on_lists": len(f.blocked), "lists_enabled": active, "lists_skipped": skipped,
-                    "last_update": f.last_update}
+                    "last_update": f.last_update, "next_update": f.next_update()}
         if path == "/api/lists/update" and method == "POST":
             f.update_async()
             return {"ok": True, "running": True}

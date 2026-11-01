@@ -524,6 +524,86 @@ class TestListUpdates(unittest.TestCase):
         upd.assert_called_once_with(True)
 
 
+class TestUpdateSchedule(unittest.TestCase):
+    """Automaattinen päivitys asetuksen välein: aika lasketaan levylle tallennetusta viimeisimmästä
+    päivityksestä, joten uudelleenkäynnistys ei siirrä sitä."""
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.src = os.path.join(self.dir, "lahde.txt")
+        with open(self.src, "w") as f:
+            f.write("0.0.0.0 eka.example.com\n")
+        path = os.path.join(self.dir, "sihti.json")
+        with open(path, "w") as f:
+            json.dump({"data_dir": self.dir, "lists": [{"url": "file://" + self.src, "enabled": True}]}, f)
+        self.cfg = Config(path)
+
+    def run_loop(self, filt):
+        """Ajaa updater_loopin yhden kierroksen ja palauttaa tehdyt päivitykset."""
+        from unittest import mock
+        calls = []
+        real = filt.update_lists
+
+        def record(missing_only=False):
+            calls.append("puuttuvat" if missing_only else "täysi")
+            real(missing_only)
+        stop = mock.Mock()
+        stop.wait.return_value = True
+        with mock.patch.object(filt, "update_lists", side_effect=record):
+            filt.updater_loop(stop)
+        return calls
+
+    def test_first_install_counts_as_full_update(self):
+        filt = Filter(self.cfg)
+        self.assertEqual(self.run_loop(filt), ["puuttuvat"])   # kaikki listat ladattiin: ei toista kierrosta
+        self.assertAlmostEqual(filt.last_update, time.time(), delta=5)
+        self.assertAlmostEqual(Filter(self.cfg).last_update, filt.last_update, delta=0.01, msg="tallessa levyllä")
+
+    def test_restart_keeps_schedule(self):
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        filt.last_update = time.time() - 20 * 3600
+        filt._save_last_update()
+        restarted = Filter(self.cfg)
+        self.assertAlmostEqual(restarted.next_update(), time.time() + 4 * 3600, delta=5)
+        self.assertEqual(self.run_loop(restarted), ["puuttuvat"], "ei vielä täyttä päivitystä")
+        restarted.last_update = time.time() - 25 * 3600
+        restarted._save_last_update()
+        self.assertEqual(self.run_loop(Filter(self.cfg)), ["puuttuvat", "täysi"], "myöhässä: päivitetään heti")
+
+    def test_interval_change_applies_immediately(self):
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        filt.last_update = time.time() - 7 * 3600
+        self.assertGreater(filt.next_update(), time.time())
+        self.cfg.update(update_interval_hours=6)
+        self.assertLess(filt.next_update(), time.time())
+
+    def test_failed_update_retried_in_an_hour(self):
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        self.cfg.update(lists=self.cfg["lists"] + [{"url": "http://127.0.0.1:9/ei-vastaa.txt", "enabled": True}])
+        with self.assertLogs("sihti.suodatin", "WARNING"):
+            filt.update_lists()
+        self.assertAlmostEqual(filt.next_update(), time.time() + 3600, delta=5)
+        self.cfg.update(lists=self.cfg["lists"][:1])
+        filt.update_lists()
+        self.assertAlmostEqual(filt.next_update(), time.time() + 24 * 3600, delta=5)
+
+    def test_adding_list_does_not_postpone_update(self):
+        filt = Filter(self.cfg)
+        filt.update_lists()
+        filt.last_update = before = time.time() - 10 * 3600
+        filt._save_last_update()
+        other = os.path.join(self.dir, "uusi.txt")
+        with open(other, "w") as f:
+            f.write("0.0.0.0 toka.example.com\n")
+        self.cfg.update(lists=self.cfg["lists"] + [{"url": "file://" + other, "enabled": True}])
+        filt.update_lists(missing_only=True)
+        self.assertIn("toka.example.com", filt.blocked)
+        self.assertEqual(filt.last_update, before)
+
+
 class TestBackup(unittest.TestCase):
     def setUp(self):
         from unittest import mock
