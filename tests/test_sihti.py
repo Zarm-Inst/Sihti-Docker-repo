@@ -755,6 +755,13 @@ class TestService(unittest.TestCase):
             res2 = self._resolver()
             self.assertEqual(answer_ip(res2.handle(q, "2a00:1450:4001::1")), "1.2.3.4")
         self.assertEqual(answer_ip(self._resolver(local_clients_only=False).handle(q, "8.8.8.8")), "1.2.3.4")
+        # Heti laitteen käynnistyksen jälkeen (monotoninen kello pieni) omat verkot pitää silti tunnistaa
+        with mock.patch.object(R.time, "monotonic", return_value=5.0), \
+                mock.patch.object(R, "_own_ipv6_networks",
+                                  return_value=[__import__("ipaddress").ip_network("2a00:1450:4001::/48")]):
+            self.assertEqual(answer_ip(self._resolver().handle(q, "2a00:1450:4001::1")), "1.2.3.4")
+            with self.assertLogs("sihti.dns", "WARNING"):
+                self._resolver().handle(q, "8.8.8.8")
 
     def test_cname_to_blocked_name_is_blocked(self):
         for _ in range(2):   # myös välimuistista

@@ -100,10 +100,10 @@ class LocalClients:
     avoin DNS-palvelin, jota voi käyttää hyökkäyksiin, jos portti 53 aukeaa internetiin."""
     def __init__(self, config):
         self.config = config
-        self._own = (0.0, [])
+        self._own = (float("-inf"), [])   # monotoninen aika alkaa käynnistyksestä: ladataan heti
         self._extra = (None, [])
         self._cache = {}
-        self._warned = 0.0
+        self._warned = float("-inf")
 
     def allowed(self, addr):
         if not self.config["local_clients_only"]:
