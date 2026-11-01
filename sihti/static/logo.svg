@@ -1,12 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Sihti">
   <title>Sihti</title>
-  <!-- Z ohjaa DNS-kyselyt suodattimelle. I on portti, jossa on yksi aukko:
-       sallittu kysely (vihreä) pääsee läpi, estetyt (punaiset) pysähtyvät. -->
-  <circle cx="32" cy="32" r="30" fill="#1F3A33"/>
-  <path d="M12.5 19.5H31L14 44.5H32.5" fill="none" stroke="#F3F5F2" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M45 13.5V26M45 34V50.5" stroke="#8FD1BF" stroke-width="5.5" stroke-linecap="round"/>
-  <circle cx="38.9" cy="19.5" r="2.7" fill="#E8677C"/>
-  <circle cx="38.9" cy="44.5" r="2.7" fill="#E8677C"/>
-  <circle cx="32.8" cy="30" r="1.3" fill="#8FD1BF" opacity=".5"/><circle cx="37.6" cy="30" r="1.7" fill="#8FD1BF" opacity=".75"/>
-  <circle cx="53.2" cy="30" r="2.7" fill="#8FD1BF"/>
+  <!-- Z ohjaa DNS-kyselyt portille (I). Estetyt (punaiset) pysähtyvät porttiin, sallittu
+       (vihreä) kulkee portin aukosta läpi. Tummassa teemassa kiekolla on vaalea reuna,
+       jotta merkki erottuu tummasta taustasta. -->
+  <style>
+    .disc { fill: #1F3A33; } .rim { fill: none; stroke: none; }
+    @media (prefers-color-scheme: dark) { .disc { fill: #22443B; } .rim { stroke: #66B8A5; stroke-width: 1.5; } }
+  </style>
+  <circle class="disc" cx="32" cy="32" r="31"/>
+  <circle class="rim" cx="32" cy="32" r="30.25"/>
+  <path d="M12.5 18.5H30L13.5 45.5H31" fill="none" stroke="#F3F5F2" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M42 11V25M42 39V53" stroke="#8FD1BF" stroke-width="6.5" stroke-linecap="round"/>
+  <circle cx="35.4" cy="18.5" r="3.6" fill="#F0778B"/>
+  <circle cx="35.4" cy="45.5" r="3.6" fill="#F0778B"/>
+  <path d="M36 32H46" stroke="#8FD1BF" stroke-width="3.4" stroke-linecap="round" opacity=".6"/>
+  <circle cx="50.5" cy="32" r="4.3" fill="#8FD1BF"/>
 </svg>

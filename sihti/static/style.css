@@ -1,12 +1,16 @@
 :root {
-  --birch: #F3F5F2;
+  /* Sivun tausta on korttien taustaa tummempi, jotta kortit erottuvat (kontrasti tarkistettu:
+     teksti >= 7:1, himmeä teksti ja värikoodit >= 4.5:1 sekä kortilla että taustalla) */
+  --birch: #E2E8E3;
   --paper: #FFFFFF;
-  --spruce: #1F3A33;
-  --moss: #2F6F62;
+  --spruce: #14302A;
+  --moss: #2A6558;
+  --on-moss: #FFFFFF;
   --lichen: #8FA98A;
-  --lingon: #B3364A;
-  --line: #D5DBD5;
-  --muted: #5D6E68;
+  --lingon: #A82F43;
+  --line: #BFCAC2;
+  --muted: #4A5B55;
+  --shadow: 0 1px 2px rgb(20 48 42 / .07), 0 2px 8px rgb(20 48 42 / .04);
   --radius-s: 4px;
   --radius-m: 10px;
   font-family: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, "Noto Sans", sans-serif;
@@ -18,14 +22,16 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --birch: #14201C;
-    --paper: #1A2924;
-    --spruce: #E4EBE6;
-    --moss: #5FAE9C;
+    --birch: #0A1210;
+    --paper: #15221E;
+    --spruce: #EAF1EC;
+    --moss: #66B8A5;
+    --on-moss: #0A1210;
     --lichen: #6E8A6A;
-    --lingon: #E06378;
-    --line: #2C3D37;
-    --muted: #9CB0A8;
+    --lingon: #F0778B;
+    --line: #30473F;
+    --muted: #A9BCB4;
+    --shadow: none;
     color-scheme: dark;
   }
 }
@@ -45,7 +51,7 @@ a { color: var(--moss); }
   border: 1px solid var(--line); background: var(--paper); color: var(--spruce); cursor: pointer;
 }
 .btn:hover { border-color: var(--moss); }
-.btn.primary { background: var(--moss); border-color: var(--moss); color: #fff; }
+.btn.primary { background: var(--moss); border-color: var(--moss); color: var(--on-moss); }
 .btn.warn { color: var(--lingon); }
 .btn:disabled { opacity: .5; cursor: progress; }
 input, select, textarea {
@@ -234,3 +240,7 @@ summary { cursor: pointer; font-weight: 550; }
 details p { margin: .5rem 0 .25rem; font-size: .9rem; max-width: 70ch; }
 a.btn { display: inline-block; text-decoration: none; }
 @media (max-width: 560px) { .kv { grid-template-columns: 1fr; } .kv dd { margin-bottom: .5rem; } }
+
+/* Kortit erottuvat taustasta myös varjolla (tummassa teemassa ei varjoa) */
+.kpi, .settings, .lists, .table-wrap, .login-box { box-shadow: var(--shadow); }
+input[type=checkbox], input[type=radio] { accent-color: var(--moss); }

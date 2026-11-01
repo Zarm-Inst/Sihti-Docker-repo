@@ -226,4 +226,4 @@ install.sh, uninstall.sh, sihti.service   asennus ilman Dockeria
 
 ## Logo
 
-Merkki kuvaa DNS-suodatusta: **Z** ohjaa kyselyt suodattimelle, **I** on portti, jossa on yksi aukko. Sallittu kysely (vihreä) pääsee läpi, estetyt (punaiset) pysähtyvät porttiin. Kirjaimet ZI viittaavat Zarm Instrumentsiin. Tiedostot: `docs/logo.svg` (merkki), `docs/logo-full.svg` (merkki ja nimi), `docs/logo-512.png`.
+Merkki kuvaa DNS-suodatusta: **Z** ohjaa kyselyt suodattimelle, **I** on portti, jossa on yksi aukko. Sallittu kysely (vihreä) kulkee portin aukosta läpi, estetyt (punaiset) pysähtyvät porttiin. Kirjaimet ZI viittaavat Zarm Instrumentsiin. Tummassa teemassa kiekolla on vaalea reuna, jotta merkki erottuu tummasta taustasta. Tiedostot: `docs/logo.svg` (merkki), `docs/logo-full.svg` (merkki ja nimi), `docs/logo-512.png`.
