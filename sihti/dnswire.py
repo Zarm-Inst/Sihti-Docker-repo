@@ -80,12 +80,72 @@ def min_ttl(data):
         return None
 
 
+def query_edns(data, question_end):
+    """(UDP-koko, DO-bitti) kyselyn OPT-tietueesta; (None, False), jos kyselyssä ei ole EDNS:ää."""
+    try:
+        an, ns, ar = struct.unpack("!HHH", data[6:12])
+        off = question_end
+        for _ in range(an + ns + ar):
+            _, off = _read_name(data, off)
+            rtype, rclass, ttl, rdlen = struct.unpack("!HHIH", data[off:off + 10])
+            if rtype == 41:
+                return rclass, bool(ttl & 0x8000)
+            off += 10 + rdlen
+    except (ParseError, struct.error):
+        pass
+    return None, False
+
+
+def ttl_offsets(data):
+    """Vastauksen tietueiden TTL-kenttien sijainnit (OPT ei ole tietue). Välimuisti pienentää
+    niitä ajan kuluessa, jotteivät laitteet säilytä vastausta pidempään kuin pitäisi."""
+    qd, an, ns, ar = struct.unpack("!HHHH", data[4:12])
+    off = 12
+    for _ in range(qd):
+        _, off = _read_name(data, off)
+        off += 4
+    out = []
+    for _ in range(an + ns + ar):
+        _, off = _read_name(data, off)
+        rtype, rdlen = struct.unpack("!H", data[off:off + 2])[0], struct.unpack("!H", data[off + 8:off + 10])[0]
+        if rtype != 41:
+            out.append(off + 4)
+        off += 10 + rdlen
+    if off > len(data):
+        raise ParseError("tietue katkeaa")
+    return out
+
+
+def aged(data, offsets, age):
+    """Vastaus, jonka TTL:istä on vähennetty välimuistissa vietetty aika (ei alle nollan)."""
+    buf = bytearray(data)
+    for o in offsets:
+        struct.pack_into("!I", buf, o, max(0, struct.unpack_from("!I", buf, o)[0] - age))
+    return bytes(buf)
+
+
+def truncated(query, question_end, resp, edns_size):
+    """Pelkkä otsake ja kysymys TC-bitillä: vastaus ei mahdu UDP-pakettiin, joten asiakas
+    kysyy uudelleen TCP:llä. EDNS-kyselyyn vastataan myös OPT-tietueella (RFC 6891)."""
+    opt = b"\x00" + struct.pack("!HHIH", 41, 1232, 0, 0) if edns_size else b""
+    header = resp[:2] + bytes([resp[2] | 0x02, resp[3]]) + struct.pack("!HHHH", 1, 0, 0, 1 if opt else 0)
+    return header + query[12:question_end] + opt
+
+
 def rcode(data):
     return data[3] & 0x0F if len(data) >= 4 else RCODE_SERVFAIL
 
 
 def with_id(data, qid):
     return struct.pack("!H", qid) + data[2:]
+
+
+def with_question(resp, query, question_end):
+    """Välimuistin vastaus tälle kyselylle: kyselyn tunniste ja kysymys sen kirjoitusasussa
+    (osa asiakkaista vertaa isoja ja pieniä kirjaimia, ns. 0x20)."""
+    if resp[4:6] == b"\x00\x01" and resp[12:question_end].lower() == query[12:question_end].lower():
+        return query[:2] + resp[2:12] + query[12:question_end] + resp[question_end:]
+    return query[:2] + resp[2:]
 
 
 def build_response(query, question_end, rc=RCODE_NOERROR, answer_rdata=None, qtype=None, ttl=2):

@@ -269,9 +269,22 @@ window.addEventListener("resize", () => { if (current === "yleiskuva") loadOverv
 /* ---------- kyselyloki ---------- */
 let logTimer = null;
 async function loadLog() {
-  clearInterval(logTimer);
+  clearTimeout(logTimer);
+  const t = performance.now();
   await renderLog();
-  logTimer = setInterval(() => { if (current === "loki" && $("#log-live").checked) renderLog(); }, 3000);
+  scheduleLog(performance.now() - t);
+}
+// Jatkuva päivitys: seuraava haku vasta, kun edellinen on valmis. Hidas haku (esim. harvinainen
+// hakusana viikon lokista Pi:llä) harventaa päivitystä, ettei laite kuormitu jatkuvasti.
+function scheduleLog(lastMs) {
+  clearTimeout(logTimer);
+  logTimer = setTimeout(async () => {
+    if (current !== "loki") return;   // jatkuu, kun näkymään palataan (loadLog)
+    if (!$("#log-live").checked) return scheduleLog(0);
+    const t = performance.now();
+    try { await renderLog(); } catch { /* yritetään seuraavalla kerralla */ }
+    scheduleLog(performance.now() - t);
+  }, Math.max(3000, lastMs * 3));
 }
 async function renderLog() {
   const q = new URLSearchParams({ limit: 300 });

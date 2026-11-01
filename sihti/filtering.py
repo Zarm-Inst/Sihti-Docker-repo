@@ -232,10 +232,9 @@ def redundant_lists(mask_counts, n_lists, sizes, protected=()):
         skipped.append(k)
 
 
-def build_domain_set(paths, key, protected=()):
-    """Lukee listatiedostot ja rakentaa DomainSetin raakadatan. Ajetaan omassa prosessissaan,
-    jotta raskas jäsennys ei hidasta DNS-vastauksia (Pythonin GIL). Palauttaa
-    (data_bytes, index_bytes, nimiä_yhteensä, [rivejä_per_tiedosto], maskin_tyyppi, maskit_bytes,
+def _build_arrays(paths, key, protected=()):
+    """Lukee listatiedostot (välimuistista, jos mahdollista), yhdistää ne ja analysoi
+    päällekkäisyyden. Palauttaa (data, index, masks, [rivejä_per_tiedosto], maskin_tyyppi,
     {"skippable": [päällekkäiset listat], "unique": [vain tällä listalla per lista]})."""
     parts, per_file = [], []
     for path in paths:
@@ -244,14 +243,33 @@ def build_domain_set(paths, key, protected=()):
         per_file.append(n)
     mask_type = _mask_type(len(paths))
     if not parts:
-        return (b"", array("Q", [0] * (_BUCKETS + 1)).tobytes(), 0, [], mask_type, b"",
+        return (array("Q"), array("Q", [0] * (_BUCKETS + 1)), array(mask_type), [], mask_type,
                 {"skippable": [], "unique": []})
     data, index, masks = _merge(parts, mask_type)
     sizes = [len(d) for d, _ in parts]
     del parts
     skippable, unique = redundant_lists(Counter(masks), len(paths), sizes, set(protected))
-    return (data.tobytes(), index.tobytes(), len(data), per_file, mask_type, masks.tobytes(),
-            {"skippable": skippable, "unique": unique})
+    return data, index, masks, per_file, mask_type, {"skippable": skippable, "unique": unique}
+
+
+def build_domain_set(paths, key, protected=()):
+    """Kuten _build_arrays, mutta taulukot tavuina: (data_bytes, index_bytes, nimiä_yhteensä,
+    [rivejä_per_tiedosto], maskin_tyyppi, maskit_bytes, analyysi)."""
+    data, index, masks, per_file, mask_type, stats = _build_arrays(paths, key, protected)
+    return data.tobytes(), index.tobytes(), len(data), per_file, mask_type, masks.tobytes(), stats
+
+
+def _build_to_file(paths, key, protected, out):
+    """Ajetaan erillisessä prosessissa: tulos kirjoitetaan tiedostoon, josta pääprosessi lukee
+    taulukot suoraan. Prosessien välinen siirto (pickle) tekisi koko joukosta kaksi ylimääräistä
+    kopiota, mikä nostaisi muistin huippua pienimuistisella laitteella."""
+    data, index, masks, per_file, mask_type, stats = _build_arrays(paths, key, protected)
+    with open(out + ".tmp", "wb") as f:
+        index.tofile(f)
+        data.tofile(f)
+        masks.tofile(f)
+    os.replace(out + ".tmp", out)
+    return len(data), per_file, mask_type, stats
 
 
 def _mask_type(n_lists):
@@ -279,24 +297,26 @@ def _build_workers(n_lists):
     return max(1, min(n_lists, os.cpu_count() or 1, limit))
 
 
-def _build_isolated(paths, key, protected=()):
+def _build_isolated(paths, key, protected=(), out=None):
     """Rakentaa erillisissä prosesseissa: ensin muuttuneet listat jäsennetään välimuistiin,
     sitten yhdistetään. Jos prosessi kaatuu (esim. muisti loppuu) tai käsittely kestää yli
     BUILD_TIMEOUT, nostetaan virhe eikä jäädä odottamaan. Jos erillistä prosessia ei voi
-    käynnistää lainkaan, rakennetaan tässä prosessissa."""
+    käynnistää lainkaan, rakennetaan tässä prosessissa. Palauttaa kuten _build_arrays.
+    out: välitiedosto tulokselle (oletus: ensimmäisen listan hakemisto)."""
+    out = out or os.path.join(os.path.dirname(paths[0]), "joukko.tmp")
     try:
         ex = ProcessPoolExecutor(max_workers=_build_workers(len(paths)),
                                  mp_context=multiprocessing.get_context("spawn"))
         cached = [ex.submit(_list_fingerprints, p, key, False) for p in paths]
     except Exception as e:  # noqa: BLE001
         log.warning("erillistä prosessia ei voitu käyttää (%s), rakennetaan pääprosessissa", e)
-        return build_domain_set(paths, key, protected)
+        return _build_arrays(paths, key, protected)
     deadline = time.monotonic() + BUILD_TIMEOUT
     left = lambda: max(1.0, deadline - time.monotonic())  # noqa: E731
     try:
         for c in cached:
             c.result(timeout=left())
-        result = ex.submit(build_domain_set, paths, key, protected).result(timeout=left())
+        count, per_file, mask_type, stats = ex.submit(_build_to_file, paths, key, protected, out).result(timeout=left())
     except BrokenProcessPool:
         ex.shutdown(wait=False, cancel_futures=True)
         raise RuntimeError("listojen käsittely keskeytyi, koska erillinen prosessi pysähtyi "
@@ -307,7 +327,15 @@ def _build_isolated(paths, key, protected=()):
         ex.shutdown(wait=False, cancel_futures=True)
         raise RuntimeError(f"listojen käsittely kesti yli {BUILD_TIMEOUT // 60} min ja keskeytettiin") from None
     ex.shutdown(wait=True)
-    return result
+    index, data, masks = array("Q"), array("Q"), array(mask_type)
+    try:
+        with open(out, "rb") as f:
+            index.fromfile(f, _BUCKETS + 1)
+            data.fromfile(f, count)
+            masks.fromfile(f, count)
+    finally:
+        os.remove(out)
+    return data, index, masks, per_file, mask_type, stats
 
 
 def normalize_domain(raw):
@@ -663,16 +691,11 @@ class Filter:
             try:
                 stats = None
                 if paths:
-                    data_b, index_b, count, per_file, mask_type, masks_b, stats = \
-                        _build_isolated(paths, self._key, protected)
-                    data, index, masks = array("Q"), array("Q"), array(mask_type)
-                    data.frombytes(data_b)
-                    index.frombytes(index_b)
-                    masks.frombytes(masks_b)
-                    del data_b, index_b, masks_b
+                    data, index, masks, per_file, mask_type, stats = _build_isolated(
+                        paths, self._key, protected, os.path.join(self.lists_dir, "joukko.tmp"))
                     for st, n in zip(entries, per_file):
                         st["count"] = n
-                    blocked = DomainSet(self._key, data, index, count, masks, tuple(urls))
+                    blocked = DomainSet(self._key, data, index, len(data), masks, tuple(urls))
                 else:
                     blocked = DomainSet()
             except Exception as e:  # noqa: BLE001 — vanha joukko jää käyttöön

@@ -140,12 +140,16 @@ class TestDomainSet(unittest.TestCase):
         with open(p2, "w") as f:   # osin päällekkäinen, eri muoto
             f.write("".join(f"||{n}^\n" for n in names[10000:]))
         key = os.urandom(16)
-        for builder in (build_domain_set, _build_isolated):   # sama tulos omassa prosessissa
-            data_b, index_b, count, per_file, mask_type, masks_b, stats = builder([p1, p2], key)
+        def in_process(paths, key):
+            data_b, index_b, count, per_file, mask_type, masks_b, stats = build_domain_set(paths, key)
             data, index, masks = array("Q"), array("Q"), array(mask_type)
             data.frombytes(data_b)
             index.frombytes(index_b)
             masks.frombytes(masks_b)
+            return data, index, masks, per_file, mask_type, stats
+        for builder in (in_process, _build_isolated):   # sama tulos omassa prosessissa (välitiedoston kautta)
+            data, index, masks, per_file, mask_type, stats = builder([p1, p2], key)
+            count = len(data)
             ds = DomainSet(key, data, index, count, masks, ("a", "b"))
             self.assertEqual((count, per_file, mask_type, len(masks)), (20000, [12000, 10000], "B", 20000))
             self.assertTrue(all(n in ds for n in names))
@@ -158,6 +162,7 @@ class TestDomainSet(unittest.TestCase):
             self.assertEqual(stats, {"skippable": [], "unique": [10000, 8000]})
         self.assertNotIn("a.fi", DomainSet())
         self.assertIsNone(DomainSet().lookup("a.fi"))
+        self.assertFalse(os.path.exists(os.path.join(d, "joukko.tmp")), "välitiedosto poistetaan")
 
     def test_cache_reused_and_invalidated(self):
         from sihti.filtering import DomainSet, build_domain_set
@@ -270,6 +275,35 @@ class TestDnsWire(unittest.TestCase):
         self.assertEqual(r[:2], q[:2])
         self.assertEqual(struct.unpack("!H", r[6:8])[0], 1)
         self.assertEqual(w.min_ttl(r), 2)
+
+    def test_edns_ttl_aging_truncation_and_case(self):
+        opt = b"\x00" + struct.pack("!HHIH", 41, 1232, 0x8000, 0)   # EDNS, DO-bitti
+        q = make_query("WWW.Example.com")
+        q_edns = q[:10] + struct.pack("!H", 1) + q[12:] + opt
+        qend = w.parse_query(q)[4]
+        self.assertEqual(w.query_edns(q_edns, qend), (1232, True))
+        self.assertEqual(w.query_edns(q, qend), (None, False))
+        r = w.build_response(make_query("www.example.com"), qend, answer_rdata=b"\1\2\3\4", qtype=1, ttl=300)
+        self.assertEqual(w.min_ttl(w.aged(r, w.ttl_offsets(r), 100)), 200)
+        self.assertEqual(w.min_ttl(w.aged(r, w.ttl_offsets(r), 999)), 0)
+        same = w.with_question(r, q, qend)   # kysyjän kirjoitusasu ja tunniste
+        self.assertEqual((same[:2], same[12:qend]), (q[:2], q[12:qend]))
+        tc = w.truncated(q_edns, qend, r, 1232)
+        self.assertTrue(tc[2] & 0x02)
+        self.assertEqual(struct.unpack("!HHHH", tc[4:12]), (1, 0, 0, 1))
+        self.assertEqual(w.query_edns(tc, qend)[0], 1232)
+
+    def test_udp_reply_fits_client_size(self):
+        from sihti.resolver import _fit_udp
+        big = w.build_response(make_query("a.example.com"), w.parse_query(make_query("a.example.com"))[4]) + b"\0" * 3000
+        for size, fits in ((None, False), (1232, False), (4096, True)):
+            q = make_query("a.example.com")
+            if size:
+                q = q[:10] + struct.pack("!H", 1) + q[12:] + b"\x00" + struct.pack("!HHIH", 41, size, 0, 0)
+            out = _fit_udp(q, big)
+            self.assertEqual(out == big, fits, size)
+            if not fits:
+                self.assertTrue(out[2] & 0x02)
 
     def test_garbage(self):
         for junk in (b"", b"\x00" * 5, b"\x00" * 12, make_query("a.b")[:-3]):
@@ -565,6 +599,28 @@ class TestService(unittest.TestCase):
         before = self.up.count
         self.assertEqual(answer_ip(udp_ask(self.dns_port, "hyva.example.org")), "1.2.3.4")
         self.assertEqual(self.up.count, before, "toisen vastauksen pitäisi tulla välimuistista")
+
+    def test_cached_ttl_counts_down(self):
+        first = udp_ask(self.dns_port, "ttl.example.org")
+        time.sleep(1.2)
+        second = udp_ask(self.dns_port, "ttl.example.org")
+        self.assertEqual(w.min_ttl(first), 300)
+        self.assertLess(w.min_ttl(second), 300)
+
+    def test_silent_upstream_moved_last(self):
+        silent = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)   # ottaa vastaan, ei vastaa
+        silent.bind(("127.0.0.1", 0))
+        self.addCleanup(silent.close)
+        cfg = {"upstreams": [f"127.0.0.1:{silent.getsockname()[1]}", f"127.0.0.1:{self.up.port}"],
+               "upstream_timeout": 0.5, "cache_size": 0, "block_mode": "null"}
+        res = Resolver(cfg, self.filt, self.qlog)
+        times = []
+        for i in range(3):
+            t = time.monotonic()
+            self.assertEqual(answer_ip(res.handle(make_query(f"uusi{i}.example.org"), "127.0.0.1")), "1.2.3.4")
+            times.append(time.monotonic() - t)
+        self.assertGreaterEqual(times[0], 0.5)
+        self.assertLess(max(times[1:]), 0.2, "vastaamaton ylävirta pitää kokeilla viimeisenä")
 
     def test_blocked_udp_tcp_ipv6(self):
         self.assertEqual(answer_ip(udp_ask(self.dns_port, "ads.example.com")), "0.0.0.0")
