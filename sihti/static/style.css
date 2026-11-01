@@ -20,8 +20,9 @@
   background: var(--birch);
   color-scheme: light;
 }
+/* Tumma teema: laitteen asetuksen mukaan tai valittuna (data-theme) */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --birch: #0A1210;
     --paper: #15221E;
     --spruce: #EAF1EC;
@@ -34,6 +35,19 @@
     --shadow: none;
     color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+  --birch: #0A1210;
+  --paper: #15221E;
+  --spruce: #EAF1EC;
+  --moss: #66B8A5;
+  --on-moss: #0A1210;
+  --lichen: #6E8A6A;
+  --lingon: #F0778B;
+  --line: #30473F;
+  --muted: #A9BCB4;
+  --shadow: none;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--birch); }
@@ -75,7 +89,7 @@ textarea { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .login-box { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-m);
   padding: 2rem; width: min(340px, 100%); display: grid; gap: .5rem; }
 .login-box h1 { margin: 0 0 1rem; font-size: 1.5rem; }
-.login-logo img { display: block; width: 220px; height: auto; }
+.login-logo svg { display: block; width: 220px; height: auto; }
 .login-box label { font-size: .9rem; color: var(--muted); }
 
 /* Yläpalkki */
@@ -244,3 +258,14 @@ a.btn { display: inline-block; text-decoration: none; }
 /* Kortit erottuvat taustasta myös varjolla (tummassa teemassa ei varjoa) */
 .kpi, .settings, .lists, .table-wrap, .login-box { box-shadow: var(--shadow); }
 input[type=checkbox], input[type=radio] { accent-color: var(--moss); }
+
+/* Logo sivun sisällä: värit teeman mukaan (tummassa vaalea reuna, ettei merkki katoa taustaan) */
+:root { --mark-disc: #1F3A33; --mark-rim: transparent; }
+:root[data-theme="dark"] { --mark-disc: #22443B; --mark-rim: #66B8A5; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --mark-disc: #22443B; --mark-rim: #66B8A5; } }
+.mark-disc { fill: var(--mark-disc); }
+.mark-rim { fill: none; stroke: var(--mark-rim); stroke-width: 1.5; }
+.mark-name { fill: var(--spruce); font-family: inherit; }
+.mark-maker { fill: var(--muted); font-family: inherit; }
+.brand svg { flex-shrink: 0; }
+.theme { font-size: .9rem; padding: .4rem .5rem; }

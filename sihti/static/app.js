@@ -115,6 +115,18 @@ function route() {
 }
 window.addEventListener("hashchange", route);
 
+/* ---------- teema ---------- */
+// Automaattinen (laitteen asetus), vaalea tai tumma. Valinta muistetaan tässä selaimessa;
+// index.html ottaa sen käyttöön jo ennen sivun piirtoa.
+function setTheme(theme) {
+  if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  try { if (theme === "light" || theme === "dark") localStorage.setItem("sihti-teema", theme); else localStorage.removeItem("sihti-teema"); }
+  catch { /* yksityinen selaus tms.: teema toimii, mutta ei säily */ }
+}
+$("#theme").value = document.documentElement.dataset.theme || "auto";
+$("#theme").addEventListener("change", (e) => setTheme(e.target.value));
+
 /* ---------- tila ja suodatuskytkin ---------- */
 let status = null;
 let statusReq = null;

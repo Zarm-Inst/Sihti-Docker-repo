@@ -7,12 +7,23 @@
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="stylesheet" href="/style.css">
+<script>/* Valittu teema heti, ettei sivu välähdä väärässä teemassa */
+try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}</script>
 </head>
 <body>
 
 <div id="login" class="login" hidden>
   <form id="login-form" class="login-box">
-    <h1 class="login-logo"><img src="/logo-full.svg" alt="Sihti – Zarm Instruments" width="260" height="64"></h1>
+    <h1 class="login-logo"><svg viewBox="0 0 260 64" width="260" height="64" role="img" aria-label="Sihti – Zarm Instruments">
+      <circle class="mark-disc" cx="32" cy="32" r="31"/><circle class="mark-rim" cx="32" cy="32" r="30.25"/>
+      <path d="M12.5 18.5H30L13.5 45.5H31" fill="none" stroke="#F3F5F2" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M42 11V25M42 39V53" stroke="#8FD1BF" stroke-width="6.5" stroke-linecap="round"/>
+      <circle cx="35.4" cy="18.5" r="3.6" fill="#F0778B"/><circle cx="35.4" cy="45.5" r="3.6" fill="#F0778B"/>
+      <path d="M36 32H46" stroke="#8FD1BF" stroke-width="3.4" stroke-linecap="round" opacity=".6"/>
+      <circle cx="50.5" cy="32" r="4.3" fill="#8FD1BF"/>
+      <text x="78" y="37" class="mark-name" font-size="31" font-weight="750" letter-spacing="-0.6">Sihti</text>
+      <text x="79" y="54" class="mark-maker" font-size="11" font-weight="550" letter-spacing="1.1">ZARM INSTRUMENTS</text>
+    </svg></h1>
     <label for="pw">Salasana</label>
     <input id="pw" type="password" autocomplete="current-password" required>
     <button type="submit" class="btn primary">Kirjaudu</button>
@@ -22,11 +33,23 @@
 
 <div id="app" hidden>
   <header class="top">
-    <a href="#yleiskuva" class="brand"><img src="/logo.svg" alt="" width="34" height="34"><span>Sihti</span></a>
+    <a href="#yleiskuva" class="brand"><svg viewBox="0 0 64 64" width="34" height="34" aria-hidden="true">
+      <circle class="mark-disc" cx="32" cy="32" r="31"/><circle class="mark-rim" cx="32" cy="32" r="30.25"/>
+      <path d="M12.5 18.5H30L13.5 45.5H31" fill="none" stroke="#F3F5F2" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M42 11V25M42 39V53" stroke="#8FD1BF" stroke-width="6.5" stroke-linecap="round"/>
+      <circle cx="35.4" cy="18.5" r="3.6" fill="#F0778B"/><circle cx="35.4" cy="45.5" r="3.6" fill="#F0778B"/>
+      <path d="M36 32H46" stroke="#8FD1BF" stroke-width="3.4" stroke-linecap="round" opacity=".6"/>
+      <circle cx="50.5" cy="32" r="4.3" fill="#8FD1BF"/>
+    </svg><span>Sihti</span></a>
     <div class="blocking">
       <span id="state-dot" class="dot"></span>
       <span id="state-text">…</span>
       <button id="toggle" class="btn"></button>
+      <select id="theme" class="theme" aria-label="Teema" title="Teema">
+        <option value="auto">◐ Auto</option>
+        <option value="light">☀ Vaalea</option>
+        <option value="dark">☾ Tumma</option>
+      </select>
       <select id="pause" aria-label="Tauota suodatus">
         <option value="">Tauota…</option>
         <option value="300">5 min</option>

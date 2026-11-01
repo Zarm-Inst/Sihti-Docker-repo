@@ -19,7 +19,7 @@ Kirjoitettu pelkällä Pythonin standardikirjastolla: ei riippuvuuksia, ei tieto
 - Kyselyloki SQLiteen, haku ja suodatus, estä/salli yhdellä napilla; jokaisen eston syy näkyy lokissa (mikä estolista, oma sääntö tai lauseke)
 - Yleiskuva: tilastoruudut läpäisseistä ja estetyistä kyselyistä (määrä, osuus ja eri verkkotunnukset), estolistojen nimien kokonaismäärä, vuorokauden kaavio, estetyimmät nimet ja aktiivisimmat laitteet
 - Suodatuksen tauotus (5 min / 30 min / 1 h) ja kytkin
-- Salasanasuojattu web-käyttöliittymä suomeksi, vaalea ja tumma teema
+- Salasanasuojattu web-käyttöliittymä suomeksi, vaalea ja tumma teema: automaattisesti laitteen asetuksen mukaan tai valittuna yläpalkista (valinta muistetaan selaimessa)
 - HTTPS omalla, automaattisesti uusiutuvalla varmenteella (http-osoitteet ohjataan https:ään)
 
 ## Asennus Dockerilla (suositus)
