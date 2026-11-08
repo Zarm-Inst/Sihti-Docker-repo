@@ -12,12 +12,18 @@ import logging
 import os
 import re
 import struct
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 
+from . import __version__
+from .fileutil import atomic_write, atomic_write_json, commit
+
 log = logging.getLogger("sihti.suodatin")
+
+USER_AGENT = f"sihti/{__version__}"   # FLT-030; versio yhdestä paikasta (H-15)
 
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9-]{2,63}$")
 _CHARS_RE = re.compile(r"[a-z0-9._-]+")
@@ -72,7 +78,8 @@ def parse_list(text):
 class DomainSet:
     """Tiivis joukko estettäviä nimiä: jokaisesta nimestä tallennetaan vain 64-bittinen
     avaimellinen tiiviste (8 tavua) yhteen lajiteltuun taulukkoon, jonka hakemisto jakaa
-    sen 65 536 lohkoon. Viisi miljoonaa nimeä vie noin 45 Mt, kun tavallisena Python-
+    sen 65 536 lohkoon. Viisi miljoonaa nimeä vie taulukkoina noin 43 Mt (koko prosessin muisti
+    on suurempi, ks. README ja tools/measure_memory.py), kun tavallisena Python-
     joukkona ne veisivät lähes gigatavun. Väärän osuman todennäköisyys on käytännössä nolla.
     Rinnakkainen bittimaski kertoo, millä listoilla nimi on (1 tavu per nimi, kun listoja
     on enintään 8), jotta kyselylokiin saadaan eston syy."""
@@ -175,7 +182,7 @@ def _list_fingerprints(path, key, load=True):
             c.write(_CACHE_HEAD.pack(_CACHE_MAGIC, key_id, st.st_size, st.st_mtime_ns, n, len(data)))
             index.tofile(c)
             data.tofile(c)
-        os.replace(cache + ".tmp", cache)
+        commit(cache + ".tmp", cache)
     except OSError as e:
         log.warning("välimuistia ei voitu tallentaa %s: %s", cache, e)
     return (data, index, n) if load else None
@@ -339,6 +346,31 @@ def _build_isolated(paths, key, protected=(), out=None):
     return data, index, masks, per_file, mask_type, stats
 
 
+_malloc_trim = None
+
+
+def release_memory():
+    """Palauttaa vapautuneen muistin käyttöjärjestelmälle (NFR-003, havainto H-16). glibc pitää
+    vanhan joukon ja väliaikaisten taulukoiden vapauttaman muistin prosessilla; malloc_trim(0)
+    palauttaa sen. Muualla (Alpine-kontin musl, macOS, Windows) funktiota ei ole: ei tehdä mitään.
+    Palauttaa True, jos kutsu tehtiin."""
+    global _malloc_trim
+    if _malloc_trim is None:
+        _malloc_trim = False
+        if sys.platform.startswith("linux"):
+            try:
+                import ctypes
+                fn = ctypes.CDLL(None).malloc_trim
+                fn.argtypes, fn.restype = [ctypes.c_size_t], ctypes.c_int
+                _malloc_trim = fn
+            except (OSError, AttributeError):
+                pass
+    if not _malloc_trim:
+        return False
+    _malloc_trim(0)
+    return True
+
+
 def normalize_domain(raw):
     """Siistii käyttäjän syötteen verkkotunnukseksi. Palauttaa None, jos tulos ei kelpaa.
     Hyväksyy esim. 'Example.com.', '*.example.com', '.example.com', '||example.com^',
@@ -419,10 +451,7 @@ class Filter:
     def _save_custom(self):
         d = {"allow": sorted(self.allow), "deny": sorted(self.deny),
              "deny_regex": [p for p, _ in self.deny_regex]}
-        tmp = self.custom_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(d, f, indent=2)
-        os.replace(tmp, self.custom_path)
+        atomic_write_json(self.custom_path, d, indent=2)
 
     def add_custom(self, kind, text):
         """Lisää yhden tai useamman säännön. Verkkotunnuksia voi erottaa rivinvaihdoilla,
@@ -519,15 +548,23 @@ class Filter:
         self.pause_until = time.time() + seconds if seconds else None
 
     # ---------- tarkistus ----------
+    def allow_rule(self, name):
+        """Oma sallittu-sääntö, joka koskee nimeä tai sen yläverkkotunnusta, tai None.
+        Ei riipu suodatuksen tilasta (käytetään myös ohitusten estossa, DNS-012)."""
+        for p in _parents(name):
+            if p in self.allow:
+                return p
+        return None
+
     def check(self, name):
         """Palauttaa (estetty: bool, syy: str|None, tarkenne: str|None).
         Syy: lista | oma | lauseke, tai sallinta (oma sallittu-sääntö ohitti suodatuksen).
         Tarkenne: listojen osoitteet välilyönnein, osunut oma sääntö tai lauseke."""
         if not self.active:
             return False, None, None
-        for p in _parents(name):
-            if p in self.allow:
-                return False, "sallinta", p
+        rule = self.allow_rule(name)
+        if rule:
+            return False, "sallinta", rule
         sources = self.blocked.lookup(name)
         if sources is not None:
             return True, "lista", " ".join(sources) or None
@@ -555,10 +592,7 @@ class Filter:
         except OSError:
             pass
         key = os.urandom(16)
-        fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(key)
-        os.replace(path + ".tmp", path)
+        atomic_write(path, key, mode=0o600)
         return key
 
     def _load_meta(self):
@@ -569,10 +603,7 @@ class Filter:
             return {}
 
     def _save_meta(self):
-        tmp = self._meta_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._meta, f, indent=2)
-        os.replace(tmp, self._meta_path)
+        atomic_write_json(self._meta_path, self._meta, indent=2)
 
     @property
     def updating(self):
@@ -595,7 +626,7 @@ class Filter:
         tmp = dest + ".tmp"
         st = self.list_status.setdefault(url, {"updated": None, "error": None})
         meta = self._meta.get(url, {}) if os.path.exists(dest) else {}
-        headers = {"User-Agent": "sihti/1.0"}
+        headers = {"User-Agent": USER_AGENT}
         if meta.get("etag"):
             headers["If-None-Match"] = meta["etag"]
         if meta.get("modified"):
@@ -624,7 +655,7 @@ class Filter:
             else:
                 changed = new["sha256"] != meta.get("sha256")
                 if changed:
-                    os.replace(tmp, dest)
+                    commit(tmp, dest)
                 with self._meta_lock:
                     m = self._meta.setdefault(url, {})
                     for k, v in new.items():
@@ -736,7 +767,8 @@ class Filter:
             finally:
                 self.rebuilding = False
             with self._lock:
-                self.blocked = blocked
+                self.blocked = blocked   # vanha joukko vapautuu tässä
+            release_memory()
             self._built_sig = sig
             self.build_error = None
             if stats:
@@ -805,10 +837,7 @@ class Filter:
             return None
 
     def _save_last_update(self):
-        tmp = self._schedule_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"last_update": self.last_update}, f)
-        os.replace(tmp, self._schedule_path)
+        atomic_write_json(self._schedule_path, {"last_update": self.last_update})
 
     def next_update(self):
         """Seuraavan automaattisen päivityksen aika: viimeisimmästä täydestä päivityksestä

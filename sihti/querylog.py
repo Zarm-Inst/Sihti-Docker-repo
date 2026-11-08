@@ -1,9 +1,15 @@
 """Kyselyloki SQLiteen sekä tilastokyselyt käyttöliittymälle."""
+import logging
 import os
 import queue
 import sqlite3
 import threading
 import time
+
+log = logging.getLogger("sihti.loki")
+
+RETRY_DELAY = 5            # s; epäonnistunut erä kirjoitetaan uudelleen uudella yhteydellä (LOG-009)
+ERROR_LOG_INTERVAL = 60    # s; toistuva sama virhe sovelluslokiin enintään näin usein
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kyselyt (
@@ -37,6 +43,14 @@ class QueryLog:
         db.close()
         # Laskurit muistissa, jotta etusivu on nopea myös ilman lokia
         self.started = time.time()
+        # Kirjoituksen tila (LOG-009): viimeisin virhe tai None, ja käynnistyksen jälkeen
+        # kirjaamatta jääneet rivit (jono täynnä ruuhkan tai tallennusvirheen vuoksi)
+        self.write_error = None
+        self.read_error = None
+        self.dropped = 0
+        self._dropped_lock = threading.Lock()
+        self._error_logged = 0.0
+        self._failures = 0
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
@@ -50,29 +64,72 @@ class QueryLog:
         try:
             self._q.put_nowait((time.time(), client, domain, qtype, status, reason, ms, detail))
         except queue.Full:
-            pass  # ylikuormassa lokirivit pudotetaan, DNS jatkaa toimintaa
+            # Ylikuormassa tai tallennusvirheen aikana lokirivit pudotetaan, DNS jatkaa toimintaa
+            with self._dropped_lock:
+                self.dropped += 1
+
+    def _take_batch(self):
+        batch = []
+        try:
+            batch.append(self._q.get(timeout=1))
+            while len(batch) < 1000:
+                batch.append(self._q.get_nowait())
+        except queue.Empty:
+            pass
+        return batch
+
+    def _write_failed(self, e):
+        """Ensimmäinen virhe sovelluslokiin heti, toistuva enintään kerran minuutissa."""
+        self._failures += 1
+        self.write_error = str(e) or type(e).__name__
+        now = time.monotonic()
+        if self._failures == 1 or now - self._error_logged >= ERROR_LOG_INTERVAL:
+            self._error_logged = now
+            log.error("kyselylokin tallennus epäonnistui: %s (yritetään uudelleen %d s välein, "
+                      "epäonnistuneita yrityksiä: %d, kirjaamatta jääneitä rivejä: %d)",
+                      self.write_error, RETRY_DELAY, self._failures, self.dropped)
+
+    def _write_ok(self):
+        if self.write_error is not None:
+            log.info("kyselylokin tallennus toimii taas (kirjaamatta jääneitä rivejä: %d)", self.dropped)
+        self.write_error = None
+        self._failures = 0
 
     def writer_loop(self, stop_event):
-        db = self._connect()
+        """Kirjoittaa jonon erissä ja poistaa vanhat rivit (LOG-004, LOG-007). Virhe ei saa
+        pysäyttää säiettä (LOG-009): epäonnistunut erä säilytetään ja kirjoitetaan uudelleen
+        uudella yhteydellä. Sillä välin rivit jäävät jonoon, ja täyden jonon rivit pudotetaan."""
+        db = None
+        batch = []
         last_purge = 0
         while not stop_event.is_set():
-            batch = []
+            if not batch:
+                batch = self._take_batch()
             try:
-                batch.append(self._q.get(timeout=1))
-                while len(batch) < 1000:
-                    batch.append(self._q.get_nowait())
-            except queue.Empty:
-                pass
-            if batch:
-                db.executemany("INSERT INTO kyselyt (ts, client, domain, qtype, status, reason, ms, detail) "
-                               "VALUES (?,?,?,?,?,?,?,?)", batch)
-                db.commit()
-            if time.time() - last_purge > 3600:
-                cutoff = time.time() - self.config["log_retention_days"] * 86400
-                db.execute("DELETE FROM kyselyt WHERE ts < ?", (cutoff,))
-                db.commit()
-                last_purge = time.time()
-        db.close()
+                if db is None:
+                    db = self._connect()
+                if batch:
+                    db.executemany("INSERT INTO kyselyt (ts, client, domain, qtype, status, reason, ms, detail) "
+                                   "VALUES (?,?,?,?,?,?,?,?)", batch)
+                    db.commit()
+                    batch = []
+                if time.time() - last_purge > 3600:
+                    cutoff = time.time() - self.config["log_retention_days"] * 86400
+                    db.execute("DELETE FROM kyselyt WHERE ts < ?", (cutoff,))
+                    db.commit()
+                    last_purge = time.time()
+                self._write_ok()
+            except Exception as e:  # noqa: BLE001 – säie ei saa kuolla (esim. levy täynnä, lukko)
+                self._write_failed(e)
+                if db is not None:
+                    try:
+                        db.close()   # keskeneräinen tapahtuma perutaan
+                    except Exception:  # noqa: BLE001
+                        pass
+                    db = None
+                stop_event.wait(RETRY_DELAY)
+        if db is not None:
+            db.close()
 
     # ---------- luku ----------
     def _rows(self, sql, args=()):
@@ -88,7 +145,16 @@ class QueryLog:
             hit = self._summary_cache.get(hours)
             if hit and time.monotonic() - hit[0] < self.summary_ttl:
                 return hit[1]
-            result = self._summary(hours)
+            try:
+                result = self._summary(hours)
+            except sqlite3.Error as e:
+                # Tilakysely ei saa kaatua lokin vikaan: muuten käyttöliittymä ei voisi kertoa siitä
+                if self.read_error is None:
+                    log.error("kyselylokin luku epäonnistui: %s", e)
+                self.read_error = str(e) or type(e).__name__
+                return dict.fromkeys(("total", "blocked", "passed", "cached", "errors", "clients",
+                                      "blocked_domains", "passed_domains"), 0)
+            self.read_error = None
             self._summary_cache[hours] = (time.monotonic(), result)
             return result
 
@@ -143,7 +209,7 @@ class QueryLog:
             sql += " AND status=?"
             args.append(status)
         sql += " ORDER BY ts DESC LIMIT ?"
-        args.append(min(int(limit), 2000))
+        args.append(max(1, min(int(limit), 2000)))   # LIMIT -1 olisi SQLitessä "ei rajaa"
         keys = ("ts", "client", "domain", "qtype", "status", "reason", "ms", "detail")
         return [dict(zip(keys, r)) for r in self._rows(sql, args)]
 

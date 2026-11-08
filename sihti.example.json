@@ -3,7 +3,10 @@
   "dns_port": 53,
   "web_listen": "0.0.0.0",
   "web_port": 4000,
-  "upstreams": ["1.1.1.1", "9.9.9.9"],
+  "upstreams": [
+    "1.1.1.1",
+    "9.9.9.9"
+  ],
   "upstream_timeout": 2.0,
   "block_mode": "null",
   "blocking_enabled": true,
@@ -11,13 +14,32 @@
   "log_retention_days": 7,
   "log_queries": true,
   "lists": [
-    {"url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "enabled": true}
+    {
+      "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+      "enabled": true
+    }
   ],
   "update_interval_hours": 24,
-  "password_hash": "",
+  "skip_redundant_lists": true,
+  "local_clients_only": true,
+  "allowed_networks": [],
+  "block_dns_bypass": true,
+  "block_cname": true,
+  "local_dns": "",
+  "local_domains": [
+    "lan",
+    "home",
+    "home.arpa",
+    "internal",
+    "localdomain"
+  ],
+  "dns_listen_ipv6": true,
   "https": true,
   "tls_extra_names": [],
   "tls_cert": "",
   "tls_key": "",
+  "tls_learn_names": true,
+  "tls_ca_cert": "",
+  "tls_ca_key": "",
   "data_dir": "/var/lib/sihti"
 }

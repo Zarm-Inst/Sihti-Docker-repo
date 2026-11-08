@@ -59,7 +59,7 @@ docker compose pull sihti && docker compose up -d sihti   # päivitys uuteen ver
 docker compose logs -f sihti                              # loki
 ```
 
-**Salasana:** kontti luo jokaisella käynnistyksellä uuden satunnaisen 10 merkin salasanan (A–Z, a–z, 0–9) ja tulostaa sen kontin lokiin (stdout):
+**Salasana:** Sihti luo jokaisella käynnistyksellä uuden satunnaisen 10 merkin salasanan (A–Z, a–z, 0–9) ja tulostaa sen lokiin (stdout). Salasanaa ei voi vaihtaa eikä käyttäjiä luoda käyttöliittymästä tai komentoriviltä. Tämä on tarkoituksellista, jotta salasana vaihtuu usein. Kontin lokissa rivi näyttää tältä:
 
 ```
 Sihti random password: Xq7rTb2mKa
@@ -71,7 +71,7 @@ Uusin salasana skriptissä:
 webpass=$(docker logs "$CONTAINER" 2>/dev/null | grep "random password" | tail -n1 | awk '{print $NF}')
 ```
 
-Käytä `tail -n1` eikä `grep -m1`: Docker säilyttää kontin lokin `docker restart`in ja Pi:n uudelleenkäynnistyksen yli, joten lokissa on silloin useita salasanarivejä ja vain viimeinen on voimassa. (`grep -m1` toimii vain, jos kontti luodaan aina uudelleen, esim. `docker compose up -d --force-recreate`.) Toiminnon saa pois asetuksella `SIHTI_RANDOM_PASSWORD: "false"`, jolloin salasana asetetaan käyttöliittymästä.
+Käytä `tail -n1` eikä `grep -m1`: Docker säilyttää kontin lokin `docker restart`in ja Pi:n uudelleenkäynnistyksen yli, joten lokissa on silloin useita salasanarivejä ja vain viimeinen on voimassa. (`grep -m1` toimii vain, jos kontti luodaan aina uudelleen, esim. `docker compose up -d --force-recreate`.)
 
 **Miten HTTPS-varmenne saa koneen nimen ja osoitteen ilman asetuksia:**
 
@@ -100,9 +100,17 @@ Oletuksena jokainen Pi luo oman varmentajansa, jolloin jokaisen Pi:n varmentaja 
 - Varmentajan saa ulos kontista komennolla `docker cp sihti:/data/tls/ca.crt sihti-varmentaja.crt` tai käyttöliittymästä.
 - Kontilla on terveystarkistus: `docker compose ps` näyttää tilan `healthy`.
 
-Asetuksia voi antaa ympäristömuuttujina `SIHTI_<AVAIN>` (esim. `SIHTI_UPSTREAMS: "1.1.1.1,9.9.9.9"`, `SIHTI_LOG_RETENTION_DAYS: "14"`). Ympäristömuuttuja voittaa käyttöliittymässä tehdyn muutoksen kontin seuraavalla käynnistyksellä. Estolistat ja salasana hallitaan käyttöliittymästä.
+Asetuksia voi antaa ympäristömuuttujina `SIHTI_<AVAIN>` (esim. `SIHTI_UPSTREAMS: "1.1.1.1,9.9.9.9"`, `SIHTI_LOG_RETENTION_DAYS: "14"`). Ympäristömuuttuja voittaa käyttöliittymässä tehdyn muutoksen kontin seuraavalla käynnistyksellä. Estolistoille ei ole ympäristömuuttujaa, vaan ne hallitaan käyttöliittymästä. Salasana on aina satunnainen (ks. yllä).
 
-**Oma rakennus:** `docker build -t sihti .` GitHub Actions rakentaa ja julkaisee kontin automaattisesti jokaisesta `main`-haaran muutoksesta (`:latest`) ja versiotagista `v1.2.3` (`:1.2.3`). Testit ajetaan ennen rakennusta.
+**Oma rakennus:** `docker build -t sihti .` GitHub Actions ajaa testit ja rakentaa sitten kontin. Kontti julkaistaan automaattisesti seuraavilla tageilla:
+
+| Lähde | Tagit |
+|---|---|
+| `main`-haaran muutos | `:latest` (uusin `main`-haaran rakennus) ja `:sha-xxxxxxx` |
+| versiotagi `v1.2.3` | `:1.2.3`, `:1.2` ja `:sha-xxxxxxx` |
+| esiversio `v1.2.3-rc.1` | `:1.2.3-rc.1` ja `:sha-xxxxxxx` |
+
+Versiotagi ei siirrä `:latest`-tagia. Jos haluat pysyä tietyssä julkaisussa, vaihda `docker-compose.yml`:ään esim. `:1.2` (saa korjausjulkaisut) tai `:1.2.3`. Versiotagin pitää olla sama kuin `__version__` tiedostossa `sihti/__init__.py`, muuten CI keskeyttää julkaisun. Julkaisu tehdään siis näin: päivitä versio, tee commit `main`-haaraan ja luo tagi, esim. `git tag v1.2.3 && git push origin v1.2.3`.
 
 ## Asennus Raspberry Pi:lle ilman Dockeria
 
@@ -116,7 +124,7 @@ Asennus luo `sihti`-järjestelmäkäyttäjän, kopioi ohjelman hakemistoon `/opt
 
 Asennuksen jälkeen:
 
-1. Avaa `https://<pi:n osoite>:4000/` ja aseta salasana Asetukset-välilehdeltä. Selain varoittaa ensimmäisellä kerralla, kunnes asennat varmentajan (ks. alla).
+1. Avaa `https://<pi:n osoite>:4000/` ja kirjaudu salasanalla, jonka `install.sh` tulostaa lopuksi. Salasana vaihtuu jokaisella käynnistyksellä; voimassa oleva: `sudo journalctl -u sihti | grep "random password" | tail -n1`. Selain varoittaa ensimmäisellä kerralla, kunnes asennat varmentajan (ks. alla).
 2. Anna Pi:lle kiinteä IP-osoite (helpoimmin reitittimen DHCP-varauksella).
 3. Aseta reitittimen DHCP-asetuksissa DNS-palvelimeksi Pi:n osoite. Laitteet ottavat uuden asetuksen käyttöön, kun ne uusivat osoitteensa (tai yhdistävät verkkoon uudelleen).
 
@@ -141,7 +149,7 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 
 ## Asetukset
 
-`/etc/sihti/sihti.json` – useimmat voi muuttaa myös käyttöliittymästä. Käynnistä palvelu uudelleen (`sudo systemctl restart sihti`), jos muutat kuunteluosoitteita tai portteja.
+`/etc/sihti/sihti.json` (Dockerissa `/data/sihti.json`) – useimmat voi muuttaa myös käyttöliittymästä. Tiedostossa on vain oletuksista poikkeavat arvot. Oletusarvoinen asetus jätetään pois, jotta uuden version oletukset tulevat voimaan. Kaikki avaimet oletusarvoineen ovat tiedostossa [`sihti.example.json`](sihti.example.json). Käynnistä palvelu uudelleen (`sudo systemctl restart sihti`), jos muutat kuunteluosoitteita tai portteja.
 
 | Avain | Oletus | Merkitys |
 |---|---|---|
@@ -157,13 +165,12 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 | `update_interval_hours` | `24` | Listojen päivitysväli. Lasketaan viimeisimmästä päivityksestä, joka säilyy uudelleenkäynnistyksen yli; muutos tulee voimaan heti. Epäonnistunut päivitys yritetään uudelleen tunnin päästä |
 | `skip_redundant_lists` | `true` | Ohita listat, joiden kaikki nimet ovat muilla listoilla (tarkistetaan viikoittain uudelleen) |
 | `block_cname` | `true` | Estä myös nimet, jotka osoittavat (CNAME) estettyyn nimeen |
-| `block_dns_bypass` | `true` | Firefoxin oma DNS ja iCloud Private Relay pois (niiden testinimiin vastataan "ei ole") |
+| `block_dns_bypass` | `true` | Firefoxin oma DNS ja iCloud Private Relay pois (niiden testinimiin vastataan "ei ole"). Voimassa myös tauolla ja kun suodatus on pois päältä. Oma sallinta ohittaa. |
 | `local_clients_only` | `true` | Vastaa vain lähiverkon osoitteille (yksityiset IPv4-verkot, IPv6:n paikalliset osoitteet ja koneen omat IPv6-verkot) |
 | `allowed_networks` | `[]` | Lisäksi sallitut verkot, esim. `["203.0.113.0/24"]` |
 | `local_dns` | tyhjä | Reititin paikallisille nimille, esim. `192.168.1.1` |
 | `local_domains` | `lan`, `home`, `home.arpa`, `internal`, `localdomain` | Paikalliset verkkotunnukset, jotka kysytään reitittimeltä |
 | `https` | `true` | HTTPS käyttöliittymään (`false` = pelkkä HTTP) |
-| `random_password` | `false` (Dockerissa `true`) | Uusi satunnainen salasana jokaisella käynnistyksellä, tulostuu lokiin |
 | `tls_extra_names` | `[]` | Lisänimet ja -osoitteet varmenteeseen |
 | `tls_learn_names` | `true` | Lisää käyttöliittymän avaamiseen käytetty lähiverkko-osoite tai paikallinen nimi varmenteeseen |
 | `tls_ca_cert`, `tls_ca_key` | tyhjä | Yhteinen varmentaja usealle laitteelle; tyhjä = laite luo oman |
@@ -177,7 +184,7 @@ Sihti kuuntelee myös IPv6:ta, jos laite tukee sitä. Jos reititin jakaa laittei
 
 ```bash
 cd /opt/sihti
-sudo -u sihti python3 -m sihti --config /etc/sihti/sihti.json --set-password   # salasana
+sudo journalctl -u sihti | grep "random password" | tail -n1                    # voimassa oleva salasana
 sudo -u sihti python3 -m sihti --config /etc/sihti/sihti.json --update-lists   # päivitä listat
 sudo -u sihti python3 -m sihti --config /etc/sihti/sihti.json --renew-cert     # uusi varmenne heti
 journalctl -u sihti -f                                                          # loki
@@ -199,7 +206,19 @@ python3 -m unittest discover -s tests -v   # testit
 
 - Estolistojen nimet estetään täsmällisinä (lista sisältää yleensä jokaisen aliverkkotunnuksen erikseen). Omat estot ja sallinnat koskevat myös aliverkkotunnuksia.
 - Sallittu-lista voittaa aina eston.
-- Suuretkin estolistat toimivat Pi:llä: viisi miljoonaa nimeä vie noin 120 Mt muistia, koska nimistä tallennetaan vain 8 tavun tiiviste. Listat jäsennetään erillisessä prosessissa taustalla, joten DNS vastaa heti käynnistyksessä ja listojen päivityksen aikana (vanha lista on käytössä, kunnes uusi on valmis). Mittaus 5 miljoonalla nimellä: hitain DNS-vastaus latauksen aikana 22 ms.
+- Suuretkin estolistat toimivat Pi:llä, koska nimistä tallennetaan vain 8 tavun tiiviste. Muistimittaus viidellä miljoonalla nimellä (yksi 200 Mt:n hosts-lista, Python 3.12, 64-bittinen Linux, `python3 tools/measure_memory.py`):
+
+  | | Muisti |
+  |---|---|
+  | Estojoukko (tiivisteet, hakemisto ja listamaskit) | 43 Mt |
+  | Sihti ilman listoja | 21 Mt |
+  | Sihti ensimmäisen latauksen jälkeen | 68 Mt |
+  | Sihti myöhempien päivitysten jälkeen | 68 Mt (ei kasva) |
+  | Sihti päivityksen aikana (uusi joukko luetaan, vanha vielä käytössä) | 145 Mt |
+  | Listojen käsittelyprosessi päivityksen aikana | 148 Mt |
+  | Yhteensä päivityksen aikana enimmillään | noin 215 Mt |
+
+  Käsittelyprosessi on jo päättynyt, kun Sihti lukee uuden joukon, joten huiput eivät osu samaan aikaan. Viidellä listalla luvut ovat samaa luokkaa: Sihti vie noin 70 Mt ja käsittelyprosessi noin 120 Mt. Päivityksen jälkeen vapautunut muisti palautetaan käyttöjärjestelmälle (`malloc_trim`, glibc). Alpine-kontin musl-kirjastossa tätä ei ole, eikä sitä ole mitattu. Listat jäsennetään erillisessä prosessissa taustalla, joten DNS vastaa heti käynnistyksessä ja listojen päivityksen aikana (vanha lista on käytössä, kunnes uusi on valmis). Mittaus 5 miljoonalla nimellä: hitain DNS-vastaus latauksen aikana 22 ms.
 - Jos portti 53 on varattu, `install.sh` poistaa systemd-resolvedin kuuntelijan käytöstä. Muut DNS-palvelut (esim. dnsmasq) pitää pysäyttää itse.
 - Komentorivitoiminnot ajetaan `sihti`-käyttäjänä (`sudo -u sihti …`), jotta tiedostojen omistajuus säilyy.
 - Poisto: `sudo ./uninstall.sh` (asetukset ja loki jäävät) tai `sudo ./uninstall.sh --purge`.
@@ -216,9 +235,11 @@ sihti/
   web.py         käyttöliittymän palvelin (HTTPS + ohjaus) ja JSON-rajapinta
   tls.py         varmentaja ja palvelinvarmenteen automaattinen uusiminen
   config.py      asetukset (tiedosto + SIHTI_*-ympäristömuuttujat)
+  fileutil.py    pysyvien tiedostojen atominen kirjoitus (fsync)
   healthcheck.py kontin terveystarkistus
   static/        käyttöliittymä (HTML, CSS, JS, logo)
 tests/           testit (python -m unittest)
+tools/           kehittäjän työkalut, esim. measure_memory.py (muistimittaus)
 docs/            logot
 Dockerfile, docker-compose.yml, .github/workflows/docker.yml
 install.sh, uninstall.sh, sihti.service   asennus ilman Dockeria

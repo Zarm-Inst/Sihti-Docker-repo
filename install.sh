@@ -31,8 +31,12 @@ cp -r "$SRC/sihti" /opt/sihti/
 find /opt/sihti -name '__pycache__' -prune -exec rm -rf {} +
 
 if [[ ! -f /etc/sihti/sihti.json ]]; then
-  install -o sihti -g sihti -m 640 "$SRC/sihti.example.json" /etc/sihti/sihti.json
-  echo "» Asetukset: /etc/sihti/sihti.json"
+  # Tyhjä tiedosto: kaikki asetukset tulevat oletuksista, ja tiedostoon tallentuvat vain muutokset.
+  # Näin uuden version oletukset tulevat voimaan. Kaikki avaimet oletusarvoineen: sihti.example.json
+  printf '{}\n' > /etc/sihti/sihti.json
+  chown sihti:sihti /etc/sihti/sihti.json
+  chmod 640 /etc/sihti/sihti.json
+  echo "» Asetukset: /etc/sihti/sihti.json (oletukset; avaimet: README tai sihti.example.json)"
 fi
 
 # systemd-resolved varaa portin 53 joissain jakeluissa
@@ -72,6 +76,14 @@ else
   echo "! Varmennetta ei syntynyt – katso: journalctl -u sihti" >&2
 fi
 
+# Käyttöliittymän salasana: satunnainen, vaihtuu jokaisella käynnistyksellä, tulostuu palvelun lokiin
+PW_CMD='sudo journalctl -u sihti | grep "random password" | tail -n1'
+for _ in $(seq 1 30); do
+  PW="$(journalctl -u sihti -b -o cat --no-pager 2>/dev/null | grep 'random password' | tail -n1 | awk '{print $NF}')"
+  [[ -n "$PW" ]] && break
+  sleep 1
+done
+
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 cat <<EOF
 
@@ -80,10 +92,12 @@ Valmis! Sihti on käynnissä.
   Käyttöliittymä:  https://${IP:-<pi:n osoite>}:${WEB_PORT}/
                    (myös http:// toimii – se ohjataan suojattuun osoitteeseen)
   DNS-palvelin:    ${IP:-<pi:n osoite>}  (portti 53)
+  Salasana:        ${PW:-katso komennolla alla}
+                   Satunnainen, vaihtuu jokaisella käynnistyksellä. Voimassa oleva:
+                     ${PW_CMD}
 
 Seuraavaksi:
-  1. Aseta salasana Asetukset-välilehdeltä, tai komentoriviltä:
-       cd /opt/sihti && sudo -u sihti python3 -m sihti --config /etc/sihti/sihti.json --set-password
+  1. Kirjaudu käyttöliittymään yllä olevalla salasanalla.
   2. Aseta reitittimen DHCP-asetuksiin DNS-palvelimeksi ${IP:-tämän laitteen osoite}.
   3. Anna Pi:lle kiinteä IP-osoite (reitittimen varaus tai /etc/dhcpcd.conf / NetworkManager).
   4. Asenna varmentaja muille laitteille: Asetukset → Suojattu yhteys → Lataa varmentaja.

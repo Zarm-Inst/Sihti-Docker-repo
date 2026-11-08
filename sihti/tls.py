@@ -19,6 +19,8 @@ import tempfile
 import threading
 import time
 
+from .fileutil import atomic_write_json, commit
+
 log = logging.getLogger("sihti.tls")
 
 CA_DAYS = 3650
@@ -45,7 +47,17 @@ def _openssl(*args, input_text=None):
     return r.stdout
 
 
-_LABEL = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+def _pair_ok(cert, key):
+    """Vastaako yksityinen avain varmennetta (TLS-026)? Avain ja varmenne siirretään paikalleen
+    kahdella erillisellä siirrolla, joten ne voivat jäädä eri pareiksi."""
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(cert, key)
+        return True
+    except (OSError, ssl.SSLError):
+        return False
+
+
+_LABEL =r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
 _NAME_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})*$")
 
 
@@ -217,14 +229,21 @@ class CertManager:
             if not os.access(self.ca_key, os.R_OK):
                 raise TLSError(f"yhteisen varmentajan avainta ei voi lukea: {self.ca_key} "
                                "(kontissa: sudo chown 10053 <avain>)")
+            if not _pair_ok(self.ca_crt, self.ca_key):
+                raise TLSError(f"yhteisen varmentajan avain ei vastaa varmennetta: {self.ca_crt}, {self.ca_key}")
             if self._not_after(self.ca_crt) - time.time() < (CERT_DAYS + 30) * 86400:
                 log.warning("yhteinen varmentaja vanhenee pian – luo uusi ja jaa se laitteille")
             return False
         if os.path.exists(self.ca_crt) and os.path.exists(self.ca_key):
+            if not _pair_ok(self.ca_crt, self.ca_key):
+                # Rikkinäisellä parilla ei voi myöntää kelvollisia varmenteita: uusi varmentaja
+                log.warning("paikallisen varmentajan avain ei vastaa varmennetta – luodaan uusi "
+                            "(asenna uusi varmentaja laitteille)")
             # Uusi varmentaja vasta, kun vanha on vanhenemassa (silloin laitteille asennetaan uusi)
-            if self._not_after(self.ca_crt) - time.time() > (CERT_DAYS + 30) * 86400:
+            elif self._not_after(self.ca_crt) - time.time() > (CERT_DAYS + 30) * 86400:
                 return False
-            log.warning("paikallinen varmentaja vanhenee pian – luodaan uusi")
+            else:
+                log.warning("paikallinen varmentaja vanhenee pian – luodaan uusi")
         host = socket.gethostname().split(".")[0]
         _openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", self.ca_key + ".tmp")
         os.chmod(self.ca_key + ".tmp", 0o600)
@@ -234,8 +253,8 @@ class CertManager:
                  "-addext", "keyUsage=critical,keyCertSign,cRLSign",
                  "-addext", "subjectKeyIdentifier=hash",
                  "-out", self.ca_crt + ".tmp")
-        os.replace(self.ca_key + ".tmp", self.ca_key)
-        os.replace(self.ca_crt + ".tmp", self.ca_crt)
+        commit(self.ca_key + ".tmp", self.ca_key)
+        commit(self.ca_crt + ".tmp", self.ca_crt)
         log.info("luotiin paikallinen varmentaja")
         return True
 
@@ -260,10 +279,12 @@ class CertManager:
             with open(crt, "w", encoding="utf-8") as f:
                 f.write(chain)
             os.chmod(key, 0o600)
-            os.replace(key, self.key)
-            os.replace(crt, self.cert)
-        with open(self.meta_path, "w", encoding="utf-8") as f:
-            json.dump({"names": names, "ips": ips, "issued": time.time()}, f, indent=2)
+            # Kaksi erillistä siirtoa: jos ne jäävät eri pareiksi (sähkökatko välissä tai
+            # samanaikainen --renew-cert), renewal_reason huomaa sen ja varmenne uusitaan.
+            commit(key, self.key)
+            commit(crt, self.cert)
+        # Tiedot vasta varmenteen jälkeen: katko tässä välissä johtaa vain uuteen uusimiseen
+        atomic_write_json(self.meta_path, {"names": names, "ips": ips, "issued": time.time()}, indent=2)
         log.info("uusi palvelinvarmenne: %s", ", ".join(names + ips))
 
     def renewal_reason(self, names, ips):
@@ -274,6 +295,8 @@ class CertManager:
             _openssl("verify", "-CAfile", self.ca_crt, self.cert)
         except TLSError:
             return "varmenne on vioittunut tai eri varmentajan"
+        if not _pair_ok(self.cert, self.key):
+            return "avain ei vastaa varmennetta"
         if left < RENEW_BEFORE_DAYS * 86400:
             return f"voimassa enää {max(0, int(left // 86400))} päivää"
         m = self._meta()
@@ -319,10 +342,7 @@ class CertManager:
                 log.warning("opittujen nimien enimmäismäärä täynnä, ohitetaan %s", v)
                 return False
             learned.append(v)
-            tmp = self.learned_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(learned, f, indent=2)
-            os.replace(tmp, self.learned_path)
+            atomic_write_json(self.learned_path, learned, indent=2)
             log.info("uusi osoite käyttöliittymälle: %s – lisätään varmenteeseen", v)
             try:
                 changed = self.ensure()

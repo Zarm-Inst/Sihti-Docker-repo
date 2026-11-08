@@ -50,7 +50,7 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
         <option value="light">☀ Vaalea</option>
         <option value="dark">☾ Tumma</option>
       </select>
-      <select id="pause" aria-label="Tauota suodatus">
+      <select id="pause" aria-label="Tauota suodatus" title="Tauko päättyy myös, jos Sihti tai laite käynnistyy uudelleen.">
         <option value="">Tauota…</option>
         <option value="300">5 min</option>
         <option value="1800">30 min</option>
@@ -71,6 +71,7 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
     <!-- Yleiskuva -->
     <section id="v-yleiskuva" class="view">
       <p class="lead" id="headline">Ladataan…</p>
+      <p class="notice log-warning" role="status" hidden></p>
       <div class="kpis" aria-label="Viimeisen vuorokauden luvut">
         <a class="kpi" href="#loki" data-status="" title="Näytä kyselyloki">
           <span class="kpi-label">Kyselyt 24 h</span>
@@ -121,6 +122,7 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
         </select>
         <label class="check"><input id="log-live" type="checkbox" checked> Päivitä jatkuvasti</label>
       </div>
+      <p class="notice log-warning" role="status" hidden></p>
       <div class="table-wrap">
         <table class="log">
           <thead><tr><th>Aika</th><th>Laite</th><th>Verkkotunnus</th><th>Tyyppi</th><th>Tila</th><th>Syy</th><th class="r">ms</th><th></th></tr></thead>
@@ -183,9 +185,9 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
           <label class="radio"><input type="radio" name="block_mode" value="nxdomain"> Nimeä ei ole olemassa (NXDOMAIN)</label>
         </fieldset>
         <fieldset class="grid2">
-          <label>Lokin säilytys (päivää)<input id="s-retention" type="number" min="1" max="365"></label>
-          <label>Välimuistin koko (nimeä)<input id="s-cache" type="number" min="0" max="1000000"></label>
-          <label>Listojen päivitysväli (tuntia)<input id="s-interval" type="number" min="1" max="720"></label>
+          <label>Lokin säilytys (päivää)<input id="s-retention" type="number" step="1" required></label>
+          <label>Välimuistin koko (nimeä)<input id="s-cache" type="number" step="1" required></label>
+          <label>Listojen päivitysväli (tuntia)<input id="s-interval" type="number" step="1" required></label>
           <label class="check"><input id="s-log" type="checkbox"> Tallenna kyselyloki</label>
         </fieldset>
         <fieldset>
@@ -196,7 +198,7 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
         <fieldset>
           <legend>Suojaus</legend>
           <label class="check"><input id="s-bypass" type="checkbox"> Estä Firefoxin oma DNS ja iCloud Private Relay</label>
-          <p class="hint">Muuten Firefox ja Apple-laitteet voivat ohittaa tämän verkon suodatuksen. Apple-laitteet ilmoittavat, että verkko on kytkenyt Private Relayn pois.</p>
+          <p class="hint">Muuten Firefox ja Apple-laitteet voivat ohittaa tämän verkon suodatuksen. Apple-laitteet ilmoittavat, että verkko on kytkenyt Private Relayn pois. Esto on voimassa myös silloin, kun suodatus on tauolla tai pois päältä, jotta laitteet eivät siirry ohittamaan Sihtiä tauon aikana. Ohitusnimen voi sallia omalla sallinnalla.</p>
           <label class="check"><input id="s-cname" type="checkbox"> Tunnista piilotetut seurantapalvelimet</label>
           <p class="hint">Estää myös nimet, jotka osoittavat (CNAME) estettyyn nimeen, esim. sivuston oman aliverkkotunnuksen taakse piilotetun seurannan.</p>
           <label class="check"><input id="s-local-only" type="checkbox"> Vastaa vain lähiverkon laitteille</label>
@@ -233,15 +235,14 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
         <p><button id="tls-renew" class="btn" type="button" hidden>Uusi varmenne nyt</button> <span id="tls-msg" class="msg" aria-live="polite"></span></p>
       </section>
 
-      <form id="pw-form" class="settings">
-        <fieldset>
-          <legend>Käyttöliittymän salasana</legend>
-          <p class="hint" id="pw-state"></p>
-          <input id="pw-new" type="password" autocomplete="new-password" placeholder="Uusi salasana (tyhjä poistaa)">
-        </fieldset>
-        <button class="btn">Vaihda salasana</button>
-        <span id="pw-msg" class="msg" aria-live="polite"></span>
-      </form>
+      <section class="settings" aria-labelledby="pw-h">
+        <h2 id="pw-h">Käyttöliittymän salasana</h2>
+        <p class="hint">Salasana on satunnainen ja vaihtuu jokaisella käynnistyksellä. Sitä ei voi vaihtaa täältä. Voimassa oleva salasana on Sihdin lokin viimeisellä rivillä, joka alkaa <code>Sihti random password</code>:</p>
+        <dl class="kv">
+          <dt>Docker</dt><dd><code>docker logs sihti 2&gt;/dev/null | grep "random password" | tail -n1</code></dd>
+          <dt>Ilman Dockeria</dt><dd><code>sudo journalctl -u sihti | grep "random password" | tail -n1</code></dd>
+        </dl>
+      </section>
 
       <div class="settings danger">
         <h2>Huolto</h2>
@@ -253,6 +254,7 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
         <button id="logout" class="btn" hidden>Kirjaudu ulos</button>
         <span id="maint-msg" class="msg" aria-live="polite"></span>
       </div>
+      <p class="hint" id="version"></p>
     </section>
   </main>
   <footer class="foot">Sihti – Zarm Instruments</footer>

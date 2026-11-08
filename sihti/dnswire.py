@@ -124,10 +124,22 @@ def aged(data, offsets, age):
     return bytes(buf)
 
 
-def truncated(query, question_end, resp, edns_size):
+EDNS_UDP_SIZE = 1232   # Sihdin omissa vastauksissa ilmoitettu UDP-koko (DNS Flag Day 2020)
+
+
+def response_opt(query, question_end):
+    """OPT-tietue Sihdin itse rakentamaan vastaukseen (RFC 6891): mukana vain, jos kyselyssä on
+    EDNS. Juurinimi, UDP-koko 1232, laajennettu koodi 0, versio 0 ja kyselyn DO-bitti (RFC 3225)."""
+    size, do = query_edns(query, question_end)
+    if size is None:
+        return b""
+    return b"\x00" + struct.pack("!HHIH", 41, EDNS_UDP_SIZE, 0x8000 if do else 0, 0)
+
+
+def truncated(query, question_end, resp):
     """Pelkkä otsake ja kysymys TC-bitillä: vastaus ei mahdu UDP-pakettiin, joten asiakas
-    kysyy uudelleen TCP:llä. EDNS-kyselyyn vastataan myös OPT-tietueella (RFC 6891)."""
-    opt = b"\x00" + struct.pack("!HHIH", 41, 1232, 0, 0) if edns_size else b""
+    kysyy uudelleen TCP:llä. EDNS-kyselyyn vastataan myös OPT-tietueella (DNS-037)."""
+    opt = response_opt(query, question_end)
     header = resp[:2] + bytes([resp[2] | 0x02, resp[3]]) + struct.pack("!HHHH", 1, 0, 0, 1 if opt else 0)
     return header + query[12:question_end] + opt
 
@@ -172,17 +184,19 @@ def with_question(resp, query, question_end):
 
 
 def build_response(query, question_end, rc=RCODE_NOERROR, answer_rdata=None, qtype=None, ttl=2):
-    """Rakentaa vastauksen kyselyn pohjalta. answer_rdata = raw-bytes A/AAAA-vastaukselle."""
+    """Rakentaa vastauksen kyselyn pohjalta. answer_rdata = raw-bytes A/AAAA-vastaukselle.
+    EDNS-kyselyn vastaukseen lisätään OPT-tietue (DNS-037)."""
     qid, flags = struct.unpack("!HH", query[:4])
     rd = flags & 0x0100
     resp_flags = 0x8000 | 0x0400 | rd | 0x0080 | (rc & 0x0F)  # QR, AA, RD kopio, RA
     ancount = 1 if answer_rdata is not None else 0
-    header = struct.pack("!HHHHHH", qid, resp_flags, 1, ancount, 0, 0)
+    opt = response_opt(query, question_end)
+    header = struct.pack("!HHHHHH", qid, resp_flags, 1, ancount, 0, 1 if opt else 0)
     question = query[12:question_end]
     body = header + question
     if answer_rdata is not None:
         body += struct.pack("!HHHIH", 0xC00C, qtype, 1, ttl, len(answer_rdata)) + answer_rdata
-    return body
+    return body + opt
 
 
 def qtype_name(qtype):

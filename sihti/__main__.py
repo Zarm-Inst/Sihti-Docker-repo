@@ -1,6 +1,5 @@
-"""Käynnistys: python3 -m sihti [--config /etc/sihti/sihti.json] [--set-password]"""
+"""Käynnistys: python3 -m sihti [--config /etc/sihti/sihti.json]"""
 import argparse
-import getpass
 import logging
 import os
 import signal
@@ -18,7 +17,6 @@ from .web import App, hash_password, random_password, start_web
 def main():
     ap = argparse.ArgumentParser(prog="sihti", description="Sihti – DNS-suodatin")
     ap.add_argument("--config", default=os.environ.get("SIHTI_CONFIG", "/etc/sihti/sihti.json"))
-    ap.add_argument("--set-password", action="store_true", help="aseta käyttöliittymän salasana ja lopeta")
     ap.add_argument("--update-lists", action="store_true", help="päivitä estolistat ja lopeta")
     ap.add_argument("--renew-cert", action="store_true", help="luo uusi HTTPS-varmenne ja lopeta")
     ap.add_argument("--ca-path", action="store_true", help="tulosta paikallisen varmentajan polku ja lopeta")
@@ -30,12 +28,6 @@ def main():
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     config = Config(args.config)
-
-    if args.set_password:
-        pw = getpass.getpass("Uusi salasana (tyhjä = ei salasanaa): ")
-        config.update(password_hash=hash_password(pw) if pw else "")
-        print("Tallennettu.")
-        return
 
     if args.make_ca:
         from .tls import make_ca
@@ -60,13 +52,15 @@ def main():
         print(f"Estettäviä verkkotunnuksia: {len(filt.blocked)}")
         return
 
-    if config["random_password"]:
-        # Uusi salasana jokaisella käynnistyksellä. Rivi tulostetaan vakiotulosteeseen (stdout),
-        # jotta "docker logs <kontti> | grep" näkee sen; muu loki menee stderr:iin.
-        # Viimeinen sana on salasana: ... | grep "random password" | awk '{print $NF}'
-        pw = random_password(10)
-        config.update(password_hash=hash_password(pw))
-        print(f"Sihti random password: {pw}", file=sys.stdout, flush=True)
+    # Salasana on aina satunnainen ja vaihtuu jokaisella käynnistyksellä. Tämä on tarkoituksellista:
+    # salasanaa ei voi vaihtaa eikä käyttäjiä luoda ohjelman kautta. Tiiviste on vain muistissa.
+    # Rivi tulostetaan vakiotulosteeseen (stdout), jotta "docker logs" ja "journalctl -u sihti"
+    # näkevät sen; muu loki menee stderr:iin. Viimeinen sana on salasana:
+    #   ... | grep "random password" | tail -n1 | awk '{print $NF}'
+    pw = random_password(10)
+    password_hash = hash_password(pw)
+    print(f"Sihti random password: {pw}", file=sys.stdout, flush=True)
+    del pw
 
     stop = threading.Event()
     qlog = QueryLog(config)
@@ -86,7 +80,7 @@ def main():
         except (TLSError, OSError) as e:
             certs, tls_ctx = None, None
             logging.getLogger("sihti").error("HTTPS ei käytössä: %s – käyttöliittymä toimii HTTP:llä", e)
-    servers.append(start_web(App(config, filt, qlog, resolver, certs),
+    servers.append(start_web(App(config, filt, qlog, resolver, certs, password_hash=password_hash),
                              config["web_listen"], config["web_port"], tls_ctx))
 
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

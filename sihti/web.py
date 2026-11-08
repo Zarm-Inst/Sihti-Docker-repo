@@ -15,18 +15,58 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from . import __version__
 from .filtering import normalize_domain
 
 log = logging.getLogger("sihti.web")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 SESSION_TTL = 7 * 86400
+SESSION_MAX = 100          # istuntoja muistissa enintään; täyttyessä vanhin poistuu
+LOGIN_FAIL_DELAY = 1.0     # s; väärän salasanan jälkeen, yritykset käsitellään yksi kerrallaan
+LOGIN_WARN_INTERVAL = 60   # s; epäonnistuneista kirjautumisista varoitus enintään näin usein
 # Käyttöliittymästä muutettavat asetukset; samat tallentuvat varmuuskopioon. Verkko-, portti-,
 # salasana- ja varmenneasetukset eivät kuulu tähän, jotta palautus toiselle laitteelle ei lukitse.
 SETTINGS_KEYS = ("upstreams", "block_mode", "log_retention_days", "log_queries", "cache_size",
                  "update_interval_hours", "skip_redundant_lists", "local_clients_only", "allowed_networks",
                  "block_dns_bypass", "block_cname", "local_dns", "local_domains")
 _BOOL_SETTINGS = ("log_queries", "skip_redundant_lists", "local_clients_only", "block_dns_bypass", "block_cname")
+# Numeroasetusten sallitut arvot: (pienin, suurin, nimi virheilmoitukseen, yksikkö). Käyttöliittymä
+# lukee rajat rajapinnasta, joten ne määritellään vain tässä.
+INT_LIMITS = {
+    "log_retention_days": (1, 365, "lokin säilytyksen", "päivää"),
+    "cache_size": (0, 1_000_000, "välimuistin koon", "nimeä"),
+    "update_interval_hours": (1, 720, "listojen päivitysvälin", "tuntia"),
+}
 BACKUP_VERSION = 1
+
+
+PAUSE_MAX = 86400   # tauko enintään vuorokausi; pidempi esto kytkimellä (API-020)
+HOURS_MAX = 365 * 24   # tilastojen aikaväli enintään lokin pisin säilytysaika (API-016)
+LOG_LIMIT_MAX = 2000   # lokinäkymän rivit (API-013)
+
+
+def int_setting(key, value):
+    """Numeroasetus kokonaislukuna sallitulta väliltä. Kelpaa myös merkkijonona ("10000"), koska
+    varmuuskopiota on voitu muokata käsin. Muu arvo kaataisi välimuistin, lokin tai ajastuksen."""
+    return int_in_range(value, *INT_LIMITS[key])
+
+
+def int_in_range(value, lo, hi, label, unit):
+    """Kokonaisluku väliltä lo–hi (myös kokonaislukuarvoinen liukuluku tai merkkijono),
+    muuten ValueError suomenkielisellä ilmoituksella."""
+    n = None
+    if isinstance(value, int) and not isinstance(value, bool):
+        n = value
+    elif isinstance(value, float) and value.is_integer():
+        n = int(value)
+    elif isinstance(value, str):
+        try:
+            n = int(value.strip())
+        except ValueError:
+            pass
+    if n is None or not lo <= n <= hi:
+        raise ValueError(f"{label} pitää olla kokonaisluku {lo}–{hi:,} {unit}".replace(",", " "))
+    return n
 
 
 def ui_version():
@@ -67,29 +107,69 @@ def verify_password(password, stored):
 
 
 class App:
-    def __init__(self, config, filt, qlog, resolver, certs=None):
+    def __init__(self, config, filt, qlog, resolver, certs=None, password_hash=""):
+        """password_hash: käynnistyksessä arvotun salasanan tiiviste (vain muistissa). Salasanaa ei voi
+        vaihtaa ohjelman kautta. Tyhjä = ei salasanaa; vain testit käyttävät sitä."""
         self.config = config
+        self.password_hash = password_hash
         self.ui_version = ui_version()
         self.certs = certs          # CertManager tai None (HTTPS pois)
         self.filter = filt
         self.qlog = qlog
         self.resolver = resolver
-        self.sessions = {}
+        self.sessions = {}   # tunniste -> vanhenemisaika; lisäysjärjestys = luontijärjestys
+        self._session_lock = threading.Lock()
+        self._login_lock = threading.Lock()
+        self._failed_logins = 0
+        self._fail_warned = float("-inf")
 
     # ---------- istunnot ----------
     def auth_required(self):
-        return bool(self.config["password_hash"])
+        return bool(self.password_hash)
 
     def new_session(self):
+        """Uusi istunto. Vanhentuneet poistetaan ja istuntoja on enintään SESSION_MAX, joten
+        muisti ei kasva, vaikka kirjautumista kutsuttaisiin jatkuvasti (ilman salasanaa jokainen
+        kutsu luo istunnon)."""
         token = secrets.token_urlsafe(32)
-        self.sessions[token] = time.time() + SESSION_TTL
+        now = time.time()
+        with self._session_lock:
+            for t in [t for t, exp in self.sessions.items() if exp <= now]:
+                del self.sessions[t]
+            while len(self.sessions) >= SESSION_MAX:
+                del self.sessions[next(iter(self.sessions))]
+            self.sessions[token] = now + SESSION_TTL
         return token
+
+    def login(self, password, client):
+        """Istunnon tunniste, tai None, jos salasana on väärä. Salasanat tarkistetaan yksi kerrallaan
+        ja väärän jälkeen odotetaan lukon sisällä, joten rinnakkaisetkaan pyynnöt eivät arvaa
+        nopeammin kuin noin kerran sekunnissa, eikä raskas tiivisteen laskenta kuormita useaa ydintä."""
+        if not self.auth_required():
+            return self.new_session()
+        with self._login_lock:
+            if verify_password(password, self.password_hash):
+                return self.new_session()
+            time.sleep(LOGIN_FAIL_DELAY)
+            self._failed_logins += 1
+            now = time.monotonic()
+            if now - self._fail_warned >= LOGIN_WARN_INTERVAL:   # arvailu ei täytä lokia
+                log.warning("väärä salasana käyttöliittymään osoitteesta %s (epäonnistuneita yrityksiä "
+                            "edellisen ilmoituksen jälkeen: %d)", client, self._failed_logins)
+                self._fail_warned, self._failed_logins = now, 0
+        return None
 
     def valid_session(self, token):
         exp = self.sessions.get(token or "")
         return bool(exp and exp > time.time())
 
     # ---------- rajapinta ----------
+    def _hours(self, value):
+        """Tilastojen aikaväli (API-016): 1 h – lokin säilytysaika. Vanhempaa tietoa ei ole, ja
+        rajaton arvo kasvattaisi aikajanan pisteiden määrän niin suureksi, että muisti loppuu."""
+        hi = min(int(self.config["log_retention_days"]) * 24, HOURS_MAX)
+        return int_in_range(value, 1, hi, "aikavälin", "tuntia")
+
     def api(self, method, path, query, body):
         q = lambda k, d=None: query.get(k, [d])[0]  # noqa: E731
         f = self.filter
@@ -100,6 +180,7 @@ class App:
             return {
                 **s,
                 "ui_version": self.ui_version,
+                "version": __version__,
                 "blocking": f.active,
                 "blocking_enabled": self.config["blocking_enabled"],
                 "pause_until": f.pause_until,
@@ -117,18 +198,21 @@ class App:
                 "last_update": f.last_update,
                 "next_update": f.next_update(),
                 "uptime": time.time() - self.qlog.started,
+                "log_error": self.qlog.write_error or self.qlog.read_error,
+                "log_dropped": self.qlog.dropped,
             }
         if path == "/api/timeline" and method == "GET":
-            return self.qlog.timeline(int(q("hours", 24)))
+            return self.qlog.timeline(self._hours(q("hours", 24)))
         if path == "/api/top" and method == "GET":
-            hours = int(q("hours", 24))
+            hours = self._hours(q("hours", 24))
             return {
                 "domains": self.qlog.top("domain", "sallittu", hours),
                 "blocked": self.qlog.top("domain", "estetty", hours),
                 "clients": self.qlog.top("client", None, hours),
             }
         if path == "/api/log" and method == "GET":
-            return self.qlog.recent(q("limit", 200), q("search"), q("status"))
+            limit = int_in_range(q("limit", 200), 1, LOG_LIMIT_MAX, "rivimäärän", "riviä")
+            return self.qlog.recent(limit, q("search"), q("status"))
         if path == "/api/log/clear" and method == "POST":
             self.qlog.clear()
             return {"ok": True}
@@ -137,8 +221,9 @@ class App:
             return {"ok": True}
 
         if path == "/api/blocking" and method == "POST":
-            if "pause_seconds" in body:
-                f.pause(int(body["pause_seconds"]))
+            if "pause_seconds" in body:   # tarkistetaan ennen kuin mitään muutetaan
+                seconds = int_in_range(body["pause_seconds"], 0, PAUSE_MAX, "tauon", "sekuntia")
+                f.pause(seconds)
             if "enabled" in body:
                 self.config.update(blocking_enabled=bool(body["enabled"]))
                 f.pause(0)
@@ -211,8 +296,8 @@ class App:
         if path == "/api/settings":
             if method == "POST":
                 self.apply_settings(body)
-            return {k: self.config[k] for k in SETTINGS_KEYS} | {"has_password": self.auth_required(),
-                                                                  "random_password": bool(self.config["random_password"])}
+            return {k: self.config[k] for k in SETTINGS_KEYS} | {
+                "limits": {k: [lo, hi] for k, (lo, hi, *_) in INT_LIMITS.items()}}
 
         if path == "/api/backup":
             if method == "GET":   # asetukset, listat ja omat säännöt yhtenä tiedostona
@@ -234,12 +319,6 @@ class App:
             self.certs.renew_now()
             return self.certs.info()
 
-        if path == "/api/password" and method == "POST":
-            pw = body.get("password", "")
-            self.config.update(password_hash=hash_password(pw) if pw else "")
-            self.sessions.clear()
-            return {"ok": True, "has_password": bool(pw)}
-
         return None
 
     def apply_settings(self, body):
@@ -248,6 +327,9 @@ class App:
         for k in _BOOL_SETTINGS:
             if k in changes:
                 changes[k] = bool(changes[k])
+        for k in INT_LIMITS:
+            if k in changes:
+                changes[k] = int_setting(k, changes[k])
         if "upstreams" in changes:
             ups = [str(u).strip() for u in changes["upstreams"] if str(u).strip()]
             if not ups:
@@ -375,12 +457,11 @@ def make_handler(app):
                                         "logged_in": app.valid_session(self._token()),
                                         "ui_version": app.ui_version})
             if path == "/api/login" and method == "POST":
-                if not app.auth_required() or verify_password(body.get("password", ""), app.config["password_hash"]):
-                    token = app.new_session()
+                token = app.login(str(body.get("password", "")), self.client_address[0])
+                if token:
                     return self._send(200, {"ok": True}, extra={
                         "Set-Cookie": f"sihti_sid={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_TTL}"
                                       + ("; Secure" if app.certs else "")})
-                time.sleep(1)  # hidastaa arvailua
                 return self._send(401, {"error": "väärä salasana"})
             if path == "/api/logout" and method == "POST":
                 app.sessions.pop(self._token() or "", None)

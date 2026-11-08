@@ -134,6 +134,13 @@ def build_with_other_key(path):
 
 
 class TestDomainSet(unittest.TestCase):
+    def test_release_memory(self):
+        # NFR-003, H-16: glibc-Linuxissa muisti palautetaan, muualla funktio ei tee mitään
+        import platform
+        from sihti.filtering import release_memory
+        expected = sys.platform.startswith("linux") and platform.libc_ver()[0] == "glibc"
+        self.assertEqual(release_memory(), expected)
+
     def test_build_and_lookup(self):
         from sihti.filtering import DomainSet, build_domain_set, _build_isolated
         from array import array
@@ -268,8 +275,58 @@ class TestEnv(unittest.TestCase):
             del os.environ["SIHTI_DNS_PORT"]
         with open(path) as f:
             saved = json.load(f)
-        self.assertEqual(saved["dns_port"], 53)
-        self.assertEqual(saved["cache_size"], 5)
+        self.assertNotIn("dns_port", saved)
+        self.assertEqual(saved, {"cache_size": 5})
+
+    def test_only_deviations_saved(self):
+        # CFG-004: tiedostoon vain oletuksista poikkeavat arvot; vanhan version jäätyneet oletukset pois
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "c.json")
+        with open(path, "w") as f:
+            json.dump({**DEFAULTS, "cache_size": 500, "oma_avain": 1}, f)   # kuten vanha versio tallensi
+        c = Config(path)
+        self.assertEqual(c["upstreams"], DEFAULTS["upstreams"])
+        c.update(block_cname=False)
+        with open(path) as f:
+            self.assertEqual(json.load(f), {"cache_size": 500, "oma_avain": 1, "block_cname": False})
+        c.update(cache_size=DEFAULTS["cache_size"], block_cname=True)   # takaisin oletukseen
+        with open(path) as f:
+            self.assertEqual(json.load(f), {"oma_avain": 1})
+
+    def test_default_list_change_saved_and_defaults_untouched(self):
+        # Oletuslistan muokkaus paikallaan (kuten PATCH /api/lists) tallentuu eikä muuta DEFAULTS-arvoa
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "c.json")
+        c = Config(path)
+        lists = list(c["lists"])
+        lists[0]["enabled"] = False
+        c.update(lists=lists)
+        self.assertTrue(DEFAULTS["lists"][0]["enabled"])
+        self.assertFalse(Config(path)["lists"][0]["enabled"])
+
+    def test_example_config_matches_defaults(self):
+        # sihti.example.json dokumentoi kaikki avaimet oletusarvoineen
+        with open(os.path.join(os.path.dirname(__file__), "..", "sihti.example.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), DEFAULTS)
+
+    def test_obsolete_password_keys_dropped(self):
+        # CFG-005: vanhan version salasana-avaimet jätetään huomiotta ja poistuvat tallennuksessa
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "c.json")
+        with open(path, "w") as f:
+            json.dump({"password_hash": "pbkdf2$00$00", "random_password": False, "cache_size": 7}, f)
+        c = Config(path)
+        self.assertNotIn("password_hash", c.data)
+        self.assertNotIn("random_password", c.data)
+        c.update(cache_size=8)
+        with open(path) as f:
+            saved = json.load(f)
+        self.assertNotIn("password_hash", saved)
+        self.assertNotIn("random_password", saved)
+        self.assertEqual(saved["cache_size"], 8)
 
 
 class TestDnsWire(unittest.TestCase):
@@ -294,10 +351,31 @@ class TestDnsWire(unittest.TestCase):
         self.assertEqual(w.min_ttl(w.aged(r, w.ttl_offsets(r), 999)), 0)
         same = w.with_question(r, q, qend)   # kysyjän kirjoitusasu ja tunniste
         self.assertEqual((same[:2], same[12:qend]), (q[:2], q[12:qend]))
-        tc = w.truncated(q_edns, qend, r, 1232)
+        tc = w.truncated(q_edns, qend, r)
         self.assertTrue(tc[2] & 0x02)
         self.assertEqual(struct.unpack("!HHHH", tc[4:12]), (1, 0, 0, 1))
-        self.assertEqual(w.query_edns(tc, qend)[0], 1232)
+        self.assertEqual(w.query_edns(tc, qend), (1232, True), "DO-bitti kopioidaan")
+
+    def test_own_responses_have_opt_for_edns_query(self):
+        # DNS-037: Sihdin omiin vastauksiin OPT, kun kyselyssä on EDNS (H-10)
+        q = make_query("ads.example.com")
+        qend = w.parse_query(q)[4]
+        for size, flags, do in ((4096, 0x8000, True), (512, 0, False), (0, 0, False)):
+            q_edns = q[:10] + struct.pack("!H", 1) + q[12:] + b"\x00" + struct.pack("!HHIH", 41, size, flags, 0)
+            for kw in ({"rc": w.RCODE_NXDOMAIN}, {"rc": w.RCODE_REFUSED}, {"rc": w.RCODE_SERVFAIL},
+                       {"answer_rdata": b"\0\0\0\0", "qtype": 1}, {}):
+                r = w.build_response(q_edns, qend, **kw)
+                self.assertEqual(struct.unpack("!H", r[10:12])[0], 1, kw)
+                self.assertEqual(w.query_edns(r, qend), (1232, do), kw)
+                self.assertEqual(r[-11:-8], b"\x00\x00\x29", "juurinimi ja tyyppi OPT")
+                self.assertEqual(r[-6:-4], b"\x00\x00", "laajennettu koodi 0, versio 0")
+                self.assertEqual(r[-2:], b"\x00\x00", "ei EDNS-asetuksia")
+                self.assertEqual(w.rcode(r), kw.get("rc", 0))
+            r = w.build_response(q_edns, qend, answer_rdata=b"\0\0\0\0", qtype=1, ttl=2)
+            self.assertEqual(w.min_ttl(r), 2, "OPT ei vaikuta TTL:ään")
+        r = w.build_response(q, qend, rc=w.RCODE_NXDOMAIN)
+        self.assertEqual(struct.unpack("!H", r[10:12])[0], 0, "ilman EDNS:ää ei OPT-tietuetta")
+        self.assertEqual(len(r), len(q))
 
     def test_cname_targets(self):
         q = make_query("www.example.com")
@@ -641,11 +719,80 @@ class TestBackup(unittest.TestCase):
     def test_invalid_backup_changes_nothing(self):
         for bad in ({"jotain": 1}, {"sihti_backup": 1, "lists": [{"url": "ftp://x"}]},
                     {"sihti_backup": 1, "settings": {"allowed_networks": ["ei verkko"]}},
-                    {"sihti_backup": 1, "settings": {"local_dns": "reititin.lan"}}):
+                    {"sihti_backup": 1, "settings": {"local_dns": "reititin.lan"}},
+                    {"sihti_backup": 1, "settings": {"cache_size": "paljon"}, "lists": []},
+                    {"sihti_backup": 1, "settings": {"log_retention_days": -1}, "lists": []}):
             with self.assertRaises(ValueError):
                 self.app.restore_backup(bad)
         self.assertEqual(len(self.cfg["lists"]), 1)
         self.assertEqual(self.cfg["allowed_networks"], [])
+        self.assertEqual(self.cfg["cache_size"], DEFAULTS["cache_size"])
+
+    def test_numeric_settings_validated(self):
+        # CFG-022: kokonaisluku sallitulta väliltä, myös merkkijonona; muu hylätään eikä mitään tallenneta
+        self.app.apply_settings({"cache_size": "5000", "log_retention_days": 14.0, "update_interval_hours": 12})
+        self.assertEqual((self.cfg["cache_size"], self.cfg["log_retention_days"], self.cfg["update_interval_hours"]),
+                         (5000, 14, 12))
+        self.assertEqual(self.app.resolver.cache.size, 5000)
+        for key, bad in (("cache_size", "abc"), ("cache_size", -1), ("cache_size", 1_000_001),
+                         ("log_retention_days", 0), ("log_retention_days", 7.5), ("log_retention_days", True),
+                         ("update_interval_hours", 721), ("update_interval_hours", None),
+                         ("update_interval_hours", [24])):
+            with self.subTest(key=key, value=bad), self.assertRaises(ValueError):
+                self.app.apply_settings({key: bad, "local_dns": "10.0.0.1"})
+        self.assertEqual(self.cfg["cache_size"], 5000)
+        self.assertEqual(self.cfg["local_dns"], "")
+
+
+class TestLogin(unittest.TestCase):
+    """WEB-012, WEB-013, WEB-017: istuntojen siivous ja yläraja, arvailun rajoitus, lokitus."""
+    def setUp(self):
+        from sihti import web
+        self.web = web
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        path = os.path.join(self.dir, "sihti.json")
+        with open(path, "w") as f:
+            json.dump({"data_dir": self.dir, "lists": []}, f)
+        self.cfg = Config(path)
+        filt = Filter(self.cfg)
+        qlog = QueryLog(self.cfg)
+        self.app = App(self.cfg, filt, qlog, Resolver(self.cfg, filt, qlog), password_hash=web.hash_password("oikea"))
+
+    def test_sessions_pruned_and_capped(self):
+        old = self.app.new_session()
+        self.app.sessions[old] = time.time() - 1   # vanhentunut
+        tokens = [self.app.new_session() for _ in range(self.web.SESSION_MAX + 5)]
+        self.assertNotIn(old, self.app.sessions)
+        self.assertEqual(len(self.app.sessions), self.web.SESSION_MAX)
+        self.assertFalse(self.app.valid_session(tokens[0]), "vanhin poistuu, kun yläraja täyttyy")
+        self.assertTrue(self.app.valid_session(tokens[-1]))
+
+    def test_wrong_passwords_checked_one_at_a_time(self):
+        from unittest import mock
+        with mock.patch.object(self.web, "LOGIN_FAIL_DELAY", 0.3):
+            t0 = time.monotonic()
+            threads = [threading.Thread(target=self.app.login, args=("väärä", "192.168.1.9")) for _ in range(3)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertGreaterEqual(time.monotonic() - t0, 0.9, "rinnakkaiset yritykset odottavat vuoroaan")
+        self.assertIsNotNone(self.app.login("oikea", "192.168.1.9"))
+
+    def test_failed_logins_logged_at_most_once_a_minute(self):
+        from unittest import mock
+        with mock.patch.object(self.web, "LOGIN_FAIL_DELAY", 0), \
+                self.assertLogs("sihti.web", "WARNING") as logs:
+            self.assertIsNone(self.app.login("väärä", "192.168.1.9"))
+            self.assertIsNone(self.app.login("väärä", "192.168.1.10"))
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("192.168.1.9", logs.output[0])
+        self.app._fail_warned -= self.web.LOGIN_WARN_INTERVAL   # minuutti kulunut
+        with mock.patch.object(self.web, "LOGIN_FAIL_DELAY", 0), \
+                self.assertLogs("sihti.web", "WARNING") as logs:
+            self.app.login("väärä", "192.168.1.11")
+        self.assertIn("jälkeen: 2)", logs.output[0])
 
 
 def _ipv6_available():
@@ -719,6 +866,71 @@ class TestQueryLogMigration(unittest.TestCase):
         qlog.summary_ttl = 0
         self.assertEqual(qlog.summary()["blocked_domains"], 3)
         qlog._rdb.close()
+
+
+class TestQueryLogWriter(unittest.TestCase):
+    """LOG-009: tietokantavirhe ei pysäytä kirjoitussäiettä (H-14)."""
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.qlog = QueryLog({"data_dir": self.dir, "log_queries": True, "log_retention_days": 7})
+        self.qlog.summary_ttl = 0
+
+    def wait(self, cond, timeout=10):
+        deadline = time.time() + timeout
+        while not cond() and time.time() < deadline:
+            time.sleep(0.05)
+        return cond()
+
+    def test_write_error_retried_and_reported(self):
+        import sqlite3
+        from sihti import querylog
+        self.addCleanup(setattr, querylog, "RETRY_DELAY", querylog.RETRY_DELAY)
+        querylog.RETRY_DELAY = 0.1
+        real, calls = self.qlog._connect, []
+
+        def flaky():   # levy täynnä kahdesti, sitten toimii
+            calls.append(1)
+            if len(calls) <= 2:
+                raise sqlite3.OperationalError("database or disk is full")
+            return real()
+        self.qlog._connect = flaky
+        self.qlog.add("10.0.0.2", "eka.fi", "A", "sallittu")
+        stop = threading.Event()
+        t = threading.Thread(target=self.qlog.writer_loop, args=(stop,))
+        with self.assertLogs("sihti.loki", "INFO") as logs:
+            t.start()
+            self.addCleanup(t.join)
+            self.addCleanup(stop.set)
+            self.assertTrue(self.wait(lambda: self.qlog.write_error is not None))
+            self.assertIn("disk is full", self.qlog.write_error)
+            self.assertTrue(self.wait(lambda: self.qlog.write_error is None), "toipuu virheestä")
+        self.assertTrue(t.is_alive(), "säie jatkaa virheen jälkeen")
+        errors = [r for r in logs.records if r.levelname == "ERROR"]
+        self.assertEqual(len(errors), 1, "toistuva virhe kirjataan enintään kerran minuutissa")
+        self.assertIn("toimii taas", logs.output[-1])
+        self.qlog.add("10.0.0.2", "toka.fi", "A", "sallittu")
+        self.assertTrue(self.wait(lambda: len(self.qlog.recent()) == 2), "epäonnistunut erä kirjoitettiin uudelleen")
+        self.assertEqual({r["domain"] for r in self.qlog.recent()}, {"eka.fi", "toka.fi"})
+        self.qlog._rdb.close()
+
+    def test_full_queue_counts_dropped(self):
+        import queue as q
+        self.qlog._q = q.Queue(maxsize=2)
+        for i in range(5):
+            self.qlog.add("10.0.0.2", f"n{i}.fi", "A", "sallittu")
+        self.assertEqual(self.qlog.dropped, 3)
+
+    def test_read_error_does_not_break_status(self):
+        import sqlite3
+
+        def broken(*_a):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        self.qlog._rows = broken
+        with self.assertLogs("sihti.loki", "ERROR"):
+            s = self.qlog.summary()
+        self.assertEqual((s["total"], s["blocked"]), (0, 0))
+        self.assertIn("malformed", self.qlog.read_error)
 
 
 # ------------------------------------------------------------- integraatiotesti
@@ -818,6 +1030,26 @@ class TestService(unittest.TestCase):
         self.api("/api/custom", "POST", {"kind": "allow", "value": "mask-h2.icloud.com"})   # oma sallinta voittaa
         self.assertEqual(answer_ip(udp_ask(self.dns_port, "mask-h2.icloud.com")), "1.2.3.4")
 
+    def test_bypass_blocked_when_paused_or_disabled_unless_allowed(self):
+        # DNS-012: ohitusten esto ei riipu tauosta eikä suodatuksen kytkimestä (H-07)
+        res = self._resolver(cache_size=0)
+        name = "use-application-dns.net"
+        rc = lambda: w.rcode(res.handle(make_query(name), "127.0.0.1"))   # noqa: E731
+        self.filt.pause(60)
+        self.addCleanup(self.filt.pause, 0)
+        self.assertFalse(self.filt.active)
+        self.assertEqual(rc(), w.RCODE_NXDOMAIN, "tauko ei salli ohitusta")
+        self.assertEqual(answer_ip(res.handle(make_query("ads.example.com"), "127.0.0.1")), "1.2.3.4",
+                         "tauolla listan nimi välitetään")
+        self.filt.pause(0)
+        self.cfg.data["blocking_enabled"] = False
+        self.addCleanup(self.cfg.data.__setitem__, "blocking_enabled", True)
+        self.assertEqual(rc(), w.RCODE_NXDOMAIN, "pois päältä oleva suodatus ei salli ohitusta")
+        self.filt.pause(60)
+        self.filt.add_custom("allow", name)   # oma sallinta voittaa myös tauolla / pois-tilassa
+        self.addCleanup(self.filt.remove_custom, "allow", name)
+        self.assertEqual(answer_ip(res.handle(make_query(name), "127.0.0.1")), "1.2.3.4")
+
     def test_only_local_clients_answered(self):
         from unittest import mock
         import sihti.resolver as R
@@ -885,8 +1117,58 @@ class TestService(unittest.TestCase):
         self.api("/api/custom", "POST", {"kind": "allow", "value": "ali.oma.example.com"})
         self.assertEqual(answer_ip(udp_ask(self.dns_port, "ali.oma.example.com")), "1.2.3.4")
 
+    def test_settings_limits_and_invalid_number(self):
+        # CFG-022: rajat tulevat rajapinnasta, ja virheellinen arvo saa 400 eikä kaada DNS:ää
+        self.assertEqual(self.api("/api/settings")["limits"]["log_retention_days"], [1, 365])
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            self.api("/api/settings", "POST", {"cache_size": "abc"})
+        self.assertEqual(e.exception.code, 400)
+        self.assertIn("välimuistin koon", json.load(e.exception)["error"])
+        self.assertEqual(answer_ip(udp_ask(self.dns_port, "h01.example.org")), "1.2.3.4")
+
+    def test_pause_validated_and_not_saved(self):
+        # API-020, FLT-060: tauko 0–86 400 s kokonaislukuna, vain muistissa (H-08)
+        self.addCleanup(self.filt.pause, 0)
+        for bad in (-1, 86401, 1.5, "abc", None, True, [60]):
+            with self.assertRaises(urllib.error.HTTPError, msg=repr(bad)) as e:
+                self.api("/api/blocking", "POST", {"pause_seconds": bad, "enabled": False})
+            self.assertEqual(e.exception.code, 400)
+            self.assertIn("tauon pitää olla kokonaisluku 0–86 400 sekuntia", json.load(e.exception)["error"])
+            self.assertTrue(self.cfg["blocking_enabled"], "hylätty pyyntö ei saa muuttaa mitään")
+            self.assertIsNone(self.filt.pause_until)
+        r = self.api("/api/blocking", "POST", {"pause_seconds": "86400"})
+        self.assertFalse(r["blocking"])
+        self.assertAlmostEqual(r["pause_until"], time.time() + 86400, delta=5)
+        with open(self.cfg.path, encoding="utf-8") as f:
+            self.assertNotIn("pause", f.read(), "tauko ei säily uudelleenkäynnistyksen yli")
+        self.assertTrue(self.api("/api/blocking", "POST", {"pause_seconds": 0})["blocking"])
+
+    def test_stats_hours_and_log_limit_validated(self):
+        # API-016, API-013: aikaväli 1 h – säilytysaika, lokirivit 1–2000 (H-13)
+        self.assertIn(len(self.api("/api/timeline?hours=168")), (168 * 6 + 1, 168 * 6 + 2))
+        self.assertIn("blocked", self.api("/api/top?hours=1"))
+        for path in ("/api/timeline?hours=169", "/api/timeline?hours=0", "/api/timeline?hours=10000000",
+                     "/api/top?hours=-5", "/api/top?hours=abc", "/api/timeline?hours=1.5"):
+            with self.assertRaises(urllib.error.HTTPError, msg=path) as e:
+                self.api(path)
+            self.assertEqual(e.exception.code, 400)
+            self.assertIn("aikavälin pitää olla kokonaisluku 1–168 tuntia", json.load(e.exception)["error"])
+        for i in range(3):
+            udp_ask(self.dns_port, f"raja{i}.example.org")
+        deadline = time.time() + 5
+        while len(self.api("/api/log?limit=2000")) < 3 and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(len(self.api("/api/log?limit=1")), 1)
+        for bad in ("-1", "0", "2001", "x"):
+            with self.assertRaises(urllib.error.HTTPError, msg=bad) as e:
+                self.api("/api/log?limit=" + bad)
+            self.assertEqual(e.exception.code, 400)
+            self.assertIn("rivimäärän pitää olla kokonaisluku 1–2 000 riviä", json.load(e.exception)["error"])
+
     def test_ui_version_reported(self):
-        v = self.api("/api/status")["ui_version"]
+        s = self.api("/api/status")
+        self.assertEqual((s["log_error"], s["log_dropped"]), (None, 0), "LOG-009: lokin tila")
+        v = s["ui_version"]
         self.assertRegex(v, r"^[0-9a-f]{12}$")
         self.assertEqual(self.api("/api/session")["ui_version"], v)
 
@@ -922,7 +1204,13 @@ class TestService(unittest.TestCase):
         os.makedirs(www)
         with open(os.path.join(www, "lisa.txt"), "w") as f:
             f.write("0.0.0.0 lisa1.example.com\n0.0.0.0 lisa2.example.com\n")
+        agents = []
+
         class Quiet(SimpleHTTPRequestHandler):
+            def do_GET(self):
+                agents.append(self.headers.get("User-Agent"))
+                super().do_GET()
+
             def log_message(self, *a):
                 pass
         srv = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=www))
@@ -938,6 +1226,9 @@ class TestService(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertEqual(s["domains_on_lists"], before + 2)
+        import sihti
+        self.assertEqual(agents, [f"sihti/{sihti.__version__}"], "FLT-030: User-Agent koodin versiosta (H-15)")
+        self.assertEqual(s["version"], sihti.__version__)
         lst = next(l for l in self.api("/api/lists") if l["url"] == extra)
         self.assertEqual((lst["count"], lst["error"], lst["in_use"]), (2, None, True))
         self.api("/api/lists", "DELETE", {"url": extra})
@@ -1030,6 +1321,63 @@ class TestLearnAddress(unittest.TestCase):
         self.assertFalse(again.ensure(), "uudelleenkäynnistys ei saa uusia varmennetta turhaan")
         self.assertIn("10.1.2.3", set(again.info()["ips"]))
 
+    def _replace_key(self, path):
+        from sihti.tls import _openssl
+        _openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", path)
+
+    def test_mismatched_server_key_renewed(self):
+        # TLS-026: avain ja varmenne jäivät eri pareiksi (katko siirtojen välissä, H-12)
+        from sihti.tls import _pair_ok
+        names, ips = self.certs._wanted()
+        self.assertIsNone(self.certs.renewal_reason(names, ips))
+        self._replace_key(self.certs.key)
+        self.assertEqual(self.certs.renewal_reason(names, ips), "avain ei vastaa varmennetta")
+        self.assertTrue(self.certs.ensure())
+        self.assertTrue(_pair_ok(self.certs.cert, self.certs.key))
+        with open(self.certs.meta_path, encoding="utf-8") as f:
+            self.assertIn("issued", json.load(f))
+        self.assertEqual([n for n in os.listdir(self.certs.dir) if n.endswith(".tmp")], [])
+
+    def test_mismatched_local_ca_recreated(self):
+        from sihti.tls import CertManager, _pair_ok
+        before = CertManager._fingerprint(self.certs.ca_crt)
+        self._replace_key(self.certs.ca_key)
+        self.assertTrue(self.certs.ensure())
+        self.assertTrue(_pair_ok(self.certs.ca_crt, self.certs.ca_key))
+        self.assertNotEqual(CertManager._fingerprint(self.certs.ca_crt), before)
+        self.assertIsNone(self.certs.renewal_reason(*self.certs._wanted()), "uusi varmenne uudelta varmentajalta")
+
+
+class TestFileUtil(unittest.TestCase):
+    """GEN-008: atominen kirjoitus fsyncillä."""
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "tila.json")
+
+    def test_write_replace_and_mode(self):
+        from sihti.fileutil import atomic_write, atomic_write_json
+        atomic_write_json(self.path, {"a": "ä"}, ensure_ascii=False)
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"a": "ä"})
+        atomic_write(self.path, b"\x01" * 16, mode=0o600)
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), b"\x01" * 16)
+        if os.name == "posix":
+            self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.listdir(self.dir), ["tila.json"])
+
+    def test_failed_write_keeps_old_file(self):
+        from sihti.fileutil import atomic_write, atomic_write_json
+        atomic_write_json(self.path, {"vanha": 1})
+        with self.assertRaises(TypeError):
+            atomic_write(self.path, 12345)   # ei tekstiä eikä tavuja: kirjoitus epäonnistuu
+        with self.assertRaises(TypeError):
+            atomic_write_json(self.path, {"x": object()})
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"vanha": 1})
+        self.assertEqual(os.listdir(self.dir), ["tila.json"], "väliaikaistiedosto poistetaan")
+
 
 @unittest.skipUnless(shutil.which("openssl"), "openssl puuttuu")
 class TestSharedCA(unittest.TestCase):
@@ -1052,7 +1400,8 @@ class TestSharedCA(unittest.TestCase):
 
 
 class TestRandomPassword(unittest.TestCase):
-    """Docker-tila: uusi satunnainen salasana jokaisella käynnistyksellä, rivi stdoutiin."""
+    """OPS-020: salasana on aina satunnainen ja vaihtuu jokaisella käynnistyksellä, rivi stdoutiin.
+    Salasanaa ei voi vaihtaa ohjelman kautta."""
     def test_format(self):
         from sihti.web import random_password
         import re
@@ -1066,12 +1415,13 @@ class TestRandomPassword(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         root = os.path.join(os.path.dirname(__file__), "..")
         web_port = free_port()
-        env = dict(os.environ, SIHTI_RANDOM_PASSWORD="true", SIHTI_HTTPS="false",
+        env = dict(os.environ, SIHTI_RANDOM_PASSWORD="false", SIHTI_HTTPS="false",
                    SIHTI_DATA_DIR=d, SIHTI_DNS_LISTEN="127.0.0.1", SIHTI_DNS_PORT=str(free_port(socket.SOCK_DGRAM)),
                    SIHTI_WEB_LISTEN="127.0.0.1", SIHTI_WEB_PORT=str(web_port), SIHTI_UPDATE_INTERVAL_HOURS="720")
         cfg = os.path.join(d, "sihti.json")
         with open(cfg, "w") as f:
-            json.dump({"lists": []}, f)
+            # Vanhan asennuksen tiedosto: salasana tyhjä ja satunnainen pois. Ne jätetään huomiotta.
+            json.dump({"lists": [], "password_hash": "", "random_password": False}, f)
         passwords = []
         for _ in range(2):
             p = subprocess.Popen([sys.executable, "-m", "sihti", "--config", cfg], cwd=root, env=env,
@@ -1094,11 +1444,42 @@ class TestRandomPassword(unittest.TestCase):
                                             headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(ok, timeout=5) as r:
                     self.assertEqual(json.load(r), {"ok": True})
+                    cookie = r.headers["Set-Cookie"].split(";")[0]
+                # Salasanaa ei voi vaihtaa rajapinnan kautta, vaikka olisi kirjautunut
+                change = urllib.request.Request(base + "/api/password", method="POST", data=b'{"password":""}',
+                                                headers={"Content-Type": "application/json", "X-Sihti": "1",
+                                                         "Cookie": cookie})
+                with self.assertRaises(urllib.error.HTTPError) as e:
+                    urllib.request.urlopen(change, timeout=5)
+                self.assertEqual(e.exception.code, 404)
             finally:
                 p.terminate()
                 p.wait(10)
                 p.stdout.close()
         self.assertNotEqual(passwords[0], passwords[1], "jokaisella käynnistyksellä uusi salasana")
+        with open(cfg) as f:
+            self.assertNotIn(passwords[1], f.read())
+        r = subprocess.run([sys.executable, "-m", "sihti", "--config", cfg, "--set-password"], cwd=root, env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 2, "komentorivillä ei ole salasanan asetusta")
+
+
+class TestRelease(unittest.TestCase):
+    """OPS-050, OPS-051: kontin tagit ja versiotagin tarkistus CI:ssä."""
+
+    def test_version_is_taggable(self):
+        import sihti
+        self.assertRegex(sihti.__version__, r"^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$",
+                         "versiotagi v<__version__> pitää olla semver-muotoinen")
+
+    def test_workflow_latest_only_from_main_and_version_checked(self):
+        path = os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "docker.yml")
+        with open(path, encoding="utf-8") as f:
+            wf = f.read()
+        self.assertIn("latest=false", wf, "versiotagi ei saa siirtää latest-tagia (OPS-050)")
+        self.assertIn("type=raw,value=latest,enable={{is_default_branch}}", wf)
+        self.assertIn("sihti.__version__", wf, "CI vertaa tagia koodin versioon (OPS-051)")
+        self.assertIn("${GITHUB_REF_NAME#v}", wf)
 
 
 if __name__ == "__main__":

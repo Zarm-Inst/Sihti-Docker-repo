@@ -1,7 +1,10 @@
 """Asetusten lataus ja tallennus (JSON)."""
+import copy
 import json
 import os
 import threading
+
+from .fileutil import atomic_write_json
 
 DEFAULTS = {
     "dns_listen": "0.0.0.0",
@@ -27,9 +30,7 @@ DEFAULTS = {
     "local_dns": "",               # reititin paikallisille nimille, esim. "192.168.1.1" (tyhjä = ei käytössä)
     "local_domains": ["lan", "home", "home.arpa", "internal", "localdomain"],
     "dns_listen_ipv6": True,       # kuuntele myös IPv6:ta, kun dns_listen on 0.0.0.0 (jos verkko tukee)
-    "password_hash": "",           # tyhjä = ei salasanaa
-    "random_password": False,      # uusi satunnainen salasana jokaisella käynnistyksellä (Docker: päällä)
-    "https": True,                 # käyttöliittymä HTTPS:llä (http-osoitteet ohjataan https:ään)
+    "https": True,                # käyttöliittymä HTTPS:llä (http-osoitteet ohjataan https:ään)
     "tls_extra_names": [],         # lisänimet/IP:t varmenteeseen, esim. ["sihti.koti", "10.0.0.5"]
     "tls_cert": "",                # oma varmenne (PEM, ketju); tyhjä = luodaan automaattisesti
     "tls_key": "",                 # oman varmenteen avain
@@ -44,7 +45,10 @@ DEFAULTS = {
 # SIHTI_UPSTREAMS="1.1.1.1,9.9.9.9", SIHTI_TLS_EXTRA_NAMES="sihti.koti,192.168.1.10".
 # Ympäristömuuttuja voittaa asetustiedoston arvon jokaisella käynnistyksellä.
 ENV_PREFIX = "SIHTI_"
-_ENV_SKIP = {"lists", "password_hash"}  # nämä hallitaan käyttöliittymästä
+_ENV_SKIP = {"lists"}  # hallitaan käyttöliittymästä
+# Poistuneet avaimet: salasana on aina satunnainen ja vain muistissa, joten vanhan asennuksen
+# tiedostossa olevat arvot jätetään huomiotta (ja poistuvat tiedostosta seuraavalla tallennuksella).
+_OBSOLETE = ("password_hash", "random_password")
 
 
 def _parse_env(key, raw):
@@ -76,6 +80,12 @@ def env_overrides(environ=None):
     return out
 
 
+def deviations(values):
+    """Vain oletuksista poikkeavat arvot. Tiedostoon ei tallenneta oletusarvoja, jotta uuden version
+    muuttamat oletukset tulevat voimaan myös vanhoissa asennuksissa. Tuntemattomat avaimet säilyvät."""
+    return {k: v for k, v in values.items() if k not in DEFAULTS or v != DEFAULTS[k]}
+
+
 class Config:
     def __init__(self, path):
         self.path = path
@@ -84,8 +94,15 @@ class Config:
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 self._file = json.load(f)
+        for key in _OBSOLETE:
+            self._file.pop(key, None)
+        # Vanhat versiot tallensivat kaikki oletusarvot: oletuksen kanssa yhtä suuret arvot eivät ole
+        # ylläpitäjän valintoja, joten ne jätetään huomiotta (ja poistuvat seuraavalla tallennuksella)
+        self._file = deviations(self._file)
         self.env = env_overrides()
-        self.data = {**DEFAULTS, **self._file, **self.env}
+        # Oletuksista kopio: muuten listan tai sanakirjan muokkaus paikallaan (esim. oletuslistan
+        # päälle/pois-valinta) muuttaisi myös DEFAULTS-arvoa, eikä muutosta tunnistettaisi poikkeamaksi
+        self.data = {**copy.deepcopy(DEFAULTS), **self._file, **self.env}
 
     def __getitem__(self, key):
         return self.data[key]
@@ -96,13 +113,10 @@ class Config:
     def update(self, **changes):
         with self._lock:
             self.data.update(changes)
-            self._file.update(changes)
+            self._file = deviations({**self._file, **changes})   # takaisin oletukseen = pois tiedostosta
             self.save()
 
     def save(self):
-        # Tiedostoon tallennetaan vain tiedoston omat arvot, ei ympäristömuuttujista tulleita
-        tmp = self.path + ".tmp"
+        # Tiedostoon tallennetaan vain oletuksista poikkeavat omat arvot, ei ympäristömuuttujista tulleita
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({**DEFAULTS, **self._file}, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        atomic_write_json(self.path, deviations(self._file), indent=2, ensure_ascii=False)

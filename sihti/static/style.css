@@ -79,6 +79,8 @@ textarea { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .grow { flex: 1; }
 .hint { color: var(--muted); font-size: .875rem; margin: .25rem 0 .75rem; }
 .error { color: var(--lingon); min-height: 1.5em; }
+.notice { border-left: 3px solid var(--lingon); background: color-mix(in srgb, var(--lingon) 10%, transparent);
+  padding: .6rem .8rem; margin: .5rem 0 1rem; border-radius: 0 6px 6px 0; font-size: .95rem; }
 .msg { margin-left: .75rem; color: var(--muted); font-size: .9rem; }
 .check, .radio { display: flex; align-items: center; gap: .5rem; font-size: .95rem; }
 .radio { margin: .4rem 0; flex-wrap: wrap; }

@@ -145,8 +145,23 @@ async function loadStatus() {
   else txt.textContent = "Suodatus pois";
   btn.textContent = status.blocking ? "Poista käytöstä" : "Ota käyttöön";
   $("#pause").hidden = !status.blocking;
+  $("#version").textContent = status.version ? `Sihti ${status.version}` : "";
+  renderLogWarning();
   if (current === "yleiskuva") { renderHeadline(); renderKpis(); }
   if (current === "listat" && status.lists_updating && !listWait) { listState = listStateFrom(status); waitForLists(); }
+}
+// Kyselylokin tallennusvirhe (LOG-009): varoitus Yleiskuvaan ja Lokiin. Pelkät pudotetut rivit
+// (ruuhka tai ohimennyt virhe) kerrotaan vain Loki-näkymässä.
+function renderLogWarning() {
+  const err = status.log_error, dropped = status.log_dropped || 0;
+  const missing = dropped ? `Käynnistyksen jälkeen kirjaamatta on jäänyt ${plural(dropped, "kysely", "kyselyä")}.` : "";
+  document.querySelectorAll(".log-warning").forEach((p) => {
+    let text = "";
+    if (err) text = `Kyselyloki ei tallennu: ${err}. DNS toimii normaalisti, ja Sihti yrittää tallentaa uudelleen. ${missing}`;
+    else if (dropped && p.closest("#v-loki")) text = `${missing} Syynä on ruuhka tai ohimennyt tallennusvirhe.`;
+    p.textContent = text.trim();
+    p.hidden = !text;
+  });
 }
 $("#toggle").addEventListener("click", async () => {
   await api("/api/blocking", { method: "POST", body: { enabled: !status.blocking } });
@@ -469,9 +484,12 @@ async function loadSettings() {
   const s = await api("/api/settings");
   $("#s-upstreams").value = s.upstreams.join("\n");
   document.querySelectorAll("input[name=block_mode]").forEach((r) => (r.checked = r.value === s.block_mode));
-  $("#s-retention").value = s.log_retention_days;
-  $("#s-cache").value = s.cache_size;
-  $("#s-interval").value = s.update_interval_hours;
+  // Numerokenttien rajat tulevat palvelimelta, joka myös tarkistaa ne
+  for (const [id, key] of [["#s-retention", "log_retention_days"], ["#s-cache", "cache_size"], ["#s-interval", "update_interval_hours"]]) {
+    const [min, max] = s.limits?.[key] || [];
+    if (min !== undefined) { $(id).min = min; $(id).max = max; }
+    $(id).value = s[key];
+  }
   $("#s-log").checked = s.log_queries;
   $("#s-skip").checked = s.skip_redundant_lists;
   $("#s-bypass").checked = s.block_dns_bypass;
@@ -481,12 +499,6 @@ async function loadSettings() {
   $("#s-local-dns").value = s.local_dns;
   $("#s-local-domains").value = s.local_domains.join(", ");
   loadTls();
-  const randomPw = !!s.random_password;
-  $("#pw-new").hidden = randomPw;
-  $("#pw-form button").hidden = randomPw;
-  $("#pw-state").textContent = randomPw
-    ? "Salasana vaihtuu satunnaiseksi jokaisella käynnistyksellä. Nykyinen salasana näkyy kontin lokissa: docker logs sihti | grep \"random password\" | tail -n1"
-    : s.has_password ? "Salasana on asetettu." : "Salasanaa ei ole asetettu – kuka tahansa lähiverkossa voi muuttaa asetuksia.";
 }
 async function loadTls() {
   const t = await api("/api/tls");
@@ -539,14 +551,6 @@ $("#settings").addEventListener("submit", async (e) => {
     } });
     flash($("#settings-msg"), "Asetukset tallennettu.");
   } catch (err) { flash($("#settings-msg"), err.message); }
-});
-$("#pw-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const r = await api("/api/password", { method: "POST", body: { password: $("#pw-new").value } });
-  $("#pw-new").value = "";
-  if (r.has_password) { location.reload(); return; }
-  flash($("#pw-msg"), "Salasana poistettu.");
-  loadSettings();
 });
 // Varmuuskopio: asetukset, estolistat ja omat säännöt yhtenä tiedostona
 $("#backup-save").addEventListener("click", async () => {

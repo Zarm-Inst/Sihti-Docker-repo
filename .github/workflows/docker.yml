@@ -1,7 +1,9 @@
 # Testaa koodin ja rakentaa Docker-kontin Raspberry Pi:lle (arm64, arm/v7) ja PC:lle (amd64).
 # Kontti julkaistaan GitHubin kontti­rekisteriin: ghcr.io/<omistaja>/<repo>
-#  - main-haara  -> :latest ja :sha-xxxxxxx
-#  - tagi v1.2.3 -> :1.2.3, :1.2 ja :latest
+#  - main-haara  -> :latest ja :sha-xxxxxxx   (:latest = uusin main-haaran rakennus)
+#  - tagi v1.2.3 -> :1.2.3, :1.2 ja :sha-xxxxxxx   (ei siirrä :latest-tagia)
+#  - esiversio v1.2.3-rc.1 -> vain :1.2.3-rc.1 ja :sha-xxxxxxx
+# Versiotagin pitää vastata koodin versiota (sihti/__init__.py: __version__), muuten julkaisu keskeytyy.
 # Pull requesteissa kontti vain rakennetaan, ei julkaista.
 name: Docker
 
@@ -24,6 +26,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Versiotagi vastaa koodin versiota
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          koodi=$(python -c "import sihti; print(sihti.__version__)")
+          tagi=${GITHUB_REF_NAME#v}
+          if [ "$koodi" != "$tagi" ]; then
+            echo "::error::Tagi $GITHUB_REF_NAME ei vastaa koodin versiota $koodi (sihti/__init__.py)"
+            exit 1
+          fi
       - name: Yksikkö- ja integraatiotestit
         run: python -m unittest discover -s tests -v
 
@@ -48,6 +59,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # latest vain main-haarasta (alla), ei automaattisesti versiotageista
+          flavor: |
+            latest=false
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}

@@ -247,8 +247,11 @@ class Resolver:
             resp = self._blocked_response(data, qend, qtype)
             self.qlog.add(client, name, tname, "estetty", reason, _ms(t0), detail)
             return resp
-        # Ohitusten testinimet (oma sallinta voittaa, kuten muissakin estoissa)
-        if self.config["block_dns_bypass"] and name in BYPASS_NAMES and reason != "sallinta":
+        # Ohitusten testinimet (DNS-012). Esto on voimassa myös tauolla ja kun suodatus on pois
+        # päältä: muuten esim. Firefox voisi ottaa oman DoH:nsa käyttöön tauon aikana ja ohittaa
+        # Sihdin vielä tauon jälkeenkin. Oma sallinta voittaa aina.
+        if (self.config["block_dns_bypass"] and name in BYPASS_NAMES and reason != "sallinta"
+                and not self.filter.allow_rule(name)):
             self.qlog.add(client, name, tname, "estetty", "ohitus", _ms(t0), BYPASS_NAMES[name])
             return w.build_response(data, qend, rc=w.RCODE_NXDOMAIN)
         local = self._local_server(name)
@@ -349,7 +352,7 @@ def _fit_udp(query, resp):
         return resp
     size, _ = w.query_edns(query, qend)
     limit = max(512, min(size, 4096)) if size else 512
-    return resp if len(resp) <= limit else w.truncated(query, qend, resp, size)
+    return resp if len(resp) <= limit else w.truncated(query, qend, resp)
 
 
 class _UDPServer(socketserver.ThreadingMixIn, socketserver.UDPServer):
