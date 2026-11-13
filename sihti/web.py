@@ -456,7 +456,7 @@ def make_handler(app):
             if path == "/api/session":
                 return self._send(200, {"auth_required": app.auth_required(),
                                         "logged_in": app.valid_session(self._token()),
-                                        "ui_version": app.ui_version})
+                                        "ui_version": app.ui_version, "version": __version__})
             if path == "/api/login" and method == "POST":
                 token = app.login(str(body.get("password", "")), self.client_address[0])
                 if token:

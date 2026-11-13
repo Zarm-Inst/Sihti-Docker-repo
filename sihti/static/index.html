@@ -28,6 +28,7 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
     <input id="pw" type="password" autocomplete="current-password" required>
     <button type="submit" class="btn primary">Kirjaudu</button>
     <p id="login-error" class="error" role="alert"></p>
+    <p class="hint login-version" data-version></p>
   </form>
 </div>
 
@@ -254,10 +255,9 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
         <button id="logout" class="btn" hidden>Kirjaudu ulos</button>
         <span id="maint-msg" class="msg" aria-live="polite"></span>
       </div>
-      <p class="hint" id="version"></p>
     </section>
   </main>
-  <footer class="foot">Sihti – Zarm Instruments</footer>
+  <footer class="foot"><span data-version>Sihti</span> – Zarm Instruments</footer>
 </div>
 
 <script src="/app.js"></script>

@@ -93,6 +93,7 @@ textarea { width: 100%; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .login-box h1 { margin: 0 0 1rem; font-size: 1.5rem; }
 .login-logo svg { display: block; width: 220px; height: auto; }
 .login-box label { font-size: .9rem; color: var(--muted); }
+.login-version { margin: .25rem 0 0; text-align: center; }
 
 /* Yläpalkki */
 .top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;

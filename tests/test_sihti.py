@@ -1239,7 +1239,11 @@ class TestService(unittest.TestCase):
         self.assertEqual((s["log_error"], s["log_dropped"]), (None, 0), "LOG-009: lokin tila")
         v = s["ui_version"]
         self.assertRegex(v, r"^[0-9a-f]{12}$")
-        self.assertEqual(self.api("/api/session")["ui_version"], v)
+        session = self.api("/api/session")
+        self.assertEqual(session["ui_version"], v)
+        from sihti import __version__
+        self.assertEqual((s["version"], session["version"]), (__version__, __version__),
+                         "UI-064: versio myös kirjautumissivulle")
 
     def test_csrf_header_required(self):
         req = urllib.request.Request(self.base + "/api/cache/clear", method="POST", data=b"{}")

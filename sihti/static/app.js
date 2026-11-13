@@ -79,10 +79,15 @@ const dayFmt = (ts) => new Date(ts * 1000).toLocaleDateString("fi-FI", { day: "n
 const dateFmt = (ts) => ts ? new Date(ts * 1000).toLocaleString("fi-FI", { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit" }) : "ei koskaan";
 
 /* ---------- kirjautuminen ---------- */
+// Ohjelman versio kirjautumissivulle ja alatunnisteeseen (UI-064)
+function showVersion(v) {
+  if (v) document.querySelectorAll("[data-version]").forEach((n) => (n.textContent = `Sihti ${v}`));
+}
 function showLogin() { $("#app").hidden = true; $("#login").hidden = false; $("#pw").focus(); }
 async function boot() {
   const s = await fetch("/api/session").then((r) => r.json());
   uiVersion = s.ui_version;
+  showVersion(s.version);
   if (s.auth_required && !s.logged_in) return showLogin();
   $("#logout").hidden = !s.auth_required;
   $("#login").hidden = true;
@@ -151,7 +156,7 @@ async function loadStatus() {
   else txt.textContent = "Suodatus pois";
   btn.textContent = status.blocking ? "Poista käytöstä" : "Ota käyttöön";
   $("#pause").hidden = !status.blocking;
-  $("#version").textContent = status.version ? `Sihti ${status.version}` : "";
+  showVersion(status.version);
   renderLogWarning();
   if (current === "yleiskuva") { renderHeadline(); renderKpis(); }
   if (current === "listat" && status.lists_updating && !listWait) { listState = listStateFrom(status); waitForLists(); }
