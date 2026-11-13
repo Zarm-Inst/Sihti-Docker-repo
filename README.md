@@ -54,9 +54,32 @@ volumes:
 ```
 
 ```bash
-docker compose up -d                                      # käynnistys
-docker compose pull sihti && docker compose up -d sihti   # päivitys uuteen versioon
-docker compose logs -f sihti                              # loki
+docker compose up -d           # käynnistys
+./update.sh                    # päivitys uuteen versioon (ks. alla)
+docker compose logs -f sihti   # loki
+```
+
+**Asennus Pi:lle ilman repon kloonausta:** tee hakemisto ja hae sinne compose-tiedosto ja päivitysskripti:
+
+```bash
+mkdir -p ~/sihti && cd ~/sihti
+curl -fsSLO https://raw.githubusercontent.com/Zarm-Inst/Sihti-Docker-repo/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Zarm-Inst/Sihti-Docker-repo/main/update.sh
+chmod +x update.sh
+docker compose up -d
+```
+
+**Päivitys:** aja `./update.sh` compose-tiedoston hakemistossa (tarvittaessa `sudo ./update.sh`). Skripti
+- hakee uusimman kontin. Jos uutta versiota ei ole, mitään ei käynnistetä uudelleen eikä salasana vaihdu
+- muuten luo kontin uudelleen, odottaa terveystarkistuksen (`healthy`) ja tulostaa version ja uuden salasanan
+- poistaa edellisen Sihti-kontin kuvan levyltä, jotta muistikortti ei täyty vanhoista versioista. Muihin kontteihin ja kuviin se ei koske.
+
+Jos Sihti on jo käytössä, hae `update.sh` **samaan hakemistoon, jossa nykyinen `docker-compose.yml` on**. Docker Compose nimeää volyymin hakemiston mukaan (esim. `sihti_sihti-data`), joten toisessa hakemistossa käynnistetty Sihti saisi uuden, tyhjän volyymin, eikä asetuksia ja listoja näkyisi.
+
+Automaattinen päivitys esim. maanantaisin klo 4: lisää `crontab -e`:llä alla oleva rivi ja vaihda polkuun oma käyttäjänimesi. Käyttäjän pitää kuulua docker-ryhmään (muuten `sudo crontab -e`). Huomaa, että salasana vaihtuu aina, kun uusi versio otetaan käyttöön:
+
+```
+0 4 * * 1  /home/pi/sihti/update.sh >> /home/pi/sihti/update.log 2>&1
 ```
 
 **Salasana:** Sihti luo jokaisella käynnistyksellä uuden satunnaisen 10 merkin salasanan (A–Z, a–z, 0–9) ja tulostaa sen lokiin (stdout). Salasanaa ei voi vaihtaa eikä käyttäjiä luoda käyttöliittymästä tai komentoriviltä. Tämä on tarkoituksellista, jotta salasana vaihtuu usein. Kontin lokissa rivi näyttää tältä:

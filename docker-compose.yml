@@ -4,7 +4,7 @@
 # isäntäkoneelta ja IP-osoite opitaan automaattisesti, kun käyttöliittymä avataan.
 #
 # Käynnistys:  docker compose up -d
-# Päivitys:    docker compose pull sihti && docker compose up -d sihti
+# Päivitys:    ./update.sh   (samassa hakemistossa; ks. README)
 # Loki:        docker compose logs -f sihti
 #
 # Omaan compose-tiedostoon: kopioi "sihti:"-palvelu services-kohdan alle ja
