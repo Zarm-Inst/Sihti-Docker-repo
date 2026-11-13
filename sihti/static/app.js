@@ -89,8 +89,14 @@ async function boot() {
   $("#app").hidden = false;
   await refreshStatus();   // tila ensin, jotta näkymä tietää esim. käynnissä olevasta listapäivityksestä
   route();
-  setInterval(refreshStatus, 10000);
+  setInterval(() => { if (!document.hidden) refreshStatus(); }, 10000);   // piilossa ei kuormiteta laitetta
 }
+// Välilehti tuli näkyviin: tila ja avoin lokinäkymä päivitetään heti, ei vasta seuraavalla kierroksella
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || $("#app").hidden) return;
+  refreshStatus();
+  if (current === "loki") $("#log-live").checked ? loadLog() : scheduleLog(0);   // ajastus jatkuu
+});
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
@@ -307,7 +313,7 @@ async function loadLog() {
 function scheduleLog(lastMs) {
   clearTimeout(logTimer);
   logTimer = setTimeout(async () => {
-    if (current !== "loki") return;   // jatkuu, kun näkymään palataan (loadLog)
+    if (current !== "loki" || document.hidden) return;   // jatkuu, kun näkymään tai välilehdelle palataan (loadLog)
     if (!$("#log-live").checked) return scheduleLog(0);
     const t = performance.now();
     try { await renderLog(); } catch { /* yritetään seuraavalla kerralla */ }

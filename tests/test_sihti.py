@@ -22,6 +22,11 @@ from sihti.filtering import Filter, normalize_domain, parse_list  # noqa: E402
 from sihti.querylog import QueryLog                     # noqa: E402
 from sihti.resolver import Resolver, start_servers     # noqa: E402
 from sihti.web import App, start_web                    # noqa: E402
+from sihti import resolver as _resolver                 # noqa: E402
+
+# Testeissä kuuntelijat suljetaan usein; tuotannon 5 s pysäytystarkistus hidastaisi ajoa turhaan.
+PROD_SERVE_POLL = _resolver.SERVE_POLL
+_resolver.SERVE_POLL = 0.2
 
 
 def free_port(kind=socket.SOCK_STREAM):
@@ -459,11 +464,20 @@ class TestListUpdates(unittest.TestCase):
         filt.update_lists(missing_only=True)
         self.assertEqual(len(filt.blocked), 2)
         old_files = {f for f in os.listdir(filt.lists_dir) if f.endswith((".txt", ".fp"))}
+        removed = self.cfg["lists"][0]["url"]
+        tmp = filt._list_file(removed) + ".tmp"   # keskeytynyt lataus (esim. sähkökatko)
+        open(tmp, "w").close()
+        self.assertIn(removed, filt._meta)
         self.cfg.update(lists=self.cfg["lists"][1:])
         filt.update_lists(missing_only=True)
         self.assertEqual(len(filt.blocked), 1)
         files = {f for f in os.listdir(filt.lists_dir) if f.endswith((".txt", ".fp"))}
         self.assertEqual(len(old_files - files), 2, "poistetun listan tiedosto ja välimuisti pois")
+        self.assertFalse(os.path.exists(tmp), "keskeytyneen latauksen väliaikaistiedosto pois")
+        self.assertNotIn(removed, filt._meta)
+        self.assertNotIn(removed, filt.list_status)
+        with open(os.path.join(filt.lists_dir, "tila.json")) as f:
+            self.assertNotIn(removed, json.load(f), "poistetun listan tiedot pois levyltä")
 
     def _lists(self, **files):
         urls = []
@@ -849,11 +863,13 @@ class TestQueryLogMigration(unittest.TestCase):
         db.commit()
         db.close()
         qlog = QueryLog({"data_dir": d, "log_queries": True, "log_retention_days": 7})
+        qlog.flush_interval = 0
         qlog.add("10.0.0.3", "uusi.fi", "A", "estetty", "oma", 0.2, "uusi.fi")
         stop = threading.Event()
         t = threading.Thread(target=qlog.writer_loop, args=(stop,))
         t.start()
         self.addCleanup(t.join)
+        self.addCleanup(qlog.wake)
         self.addCleanup(stop.set)
         time.sleep(1.5)
         rows = {r["domain"]: r for r in qlog.recent()}
@@ -868,6 +884,15 @@ class TestQueryLogMigration(unittest.TestCase):
         qlog._rdb.close()
 
 
+class TestIdleWakeups(unittest.TestCase):
+    """GEN-008: tyhjäkäynnillä säikeet eivät herää turhaan."""
+    def test_intervals(self):
+        from sihti import querylog
+        self.assertEqual(PROD_SERVE_POLL, 5)
+        self.assertEqual(querylog.FLUSH_INTERVAL, 10)
+        self.assertEqual(querylog.IDLE_WAIT, 60)
+
+
 class TestQueryLogWriter(unittest.TestCase):
     """LOG-009: tietokantavirhe ei pysäytä kirjoitussäiettä (H-14)."""
     def setUp(self):
@@ -875,12 +900,54 @@ class TestQueryLogWriter(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.qlog = QueryLog({"data_dir": self.dir, "log_queries": True, "log_retention_days": 7})
         self.qlog.summary_ttl = 0
+        self.qlog.flush_interval = 0
 
     def wait(self, cond, timeout=10):
         deadline = time.time() + timeout
         while not cond() and time.time() < deadline:
             time.sleep(0.05)
         return cond()
+
+    def start_writer(self):
+        stop = threading.Event()
+        t = threading.Thread(target=self.qlog.writer_loop, args=(stop,))
+        t.start()
+        self.addCleanup(t.join, 5)
+        self.addCleanup(self.qlog.wake)
+        self.addCleanup(stop.set)
+        return stop, t
+
+    def test_rows_saved_together_after_flush_interval(self):
+        """LOG-004: rivit kerätään ja tallennetaan yhdellä kertaa, ei jokaista erikseen."""
+        self.qlog.flush_interval = 1
+        self.qlog.add("10.0.0.2", "eka.fi", "A", "sallittu")
+        self.start_writer()
+        time.sleep(0.3)
+        self.qlog.add("10.0.0.2", "toka.fi", "A", "sallittu")
+        self.assertEqual(self.qlog.recent(), [], "ei tallenneta ennen keräysajan loppua")
+        self.assertTrue(self.wait(lambda: len(self.qlog.recent()) == 2))
+        self.qlog._rdb.close()
+
+    def test_stop_saves_collected_rows(self):
+        """GEN-007: pysäytys keskeyttää keräyksen, ja kerätyt rivit tallennetaan heti."""
+        self.qlog.flush_interval = 60
+        self.qlog.add("10.0.0.2", "eka.fi", "A", "sallittu")
+        stop, t = self.start_writer()
+        time.sleep(0.3)
+        stop.set()
+        t.join(3)
+        self.assertFalse(t.is_alive())
+        self.assertEqual([r["domain"] for r in self.qlog.recent()], ["eka.fi"])
+        self.qlog._rdb.close()
+
+    def test_wake_stops_idle_writer(self):
+        """Tyhjää jonoa odottava säie pysähtyy heti wake()-kutsusta, ei vasta IDLE_WAIT-ajan jälkeen."""
+        stop, t = self.start_writer()
+        time.sleep(0.3)
+        stop.set()
+        self.qlog.wake()
+        t.join(3)
+        self.assertFalse(t.is_alive())
 
     def test_write_error_retried_and_reported(self):
         import sqlite3
@@ -901,6 +968,7 @@ class TestQueryLogWriter(unittest.TestCase):
         with self.assertLogs("sihti.loki", "INFO") as logs:
             t.start()
             self.addCleanup(t.join)
+            self.addCleanup(self.qlog.wake)
             self.addCleanup(stop.set)
             self.assertTrue(self.wait(lambda: self.qlog.write_error is not None))
             self.assertIn("disk is full", self.qlog.write_error)
@@ -957,6 +1025,7 @@ class TestService(unittest.TestCase):
         cls.filt.update_lists()
         cls.qlog = QueryLog(cls.cfg)
         cls.qlog.summary_ttl = 0   # testit tarkistavat luvut heti kyselyjen jälkeen
+        cls.qlog.flush_interval = 0
         cls.stop = threading.Event()
         threading.Thread(target=cls.qlog.writer_loop, args=(cls.stop,), daemon=True).start()
         cls.resolver = Resolver(cls.cfg, cls.filt, cls.qlog)

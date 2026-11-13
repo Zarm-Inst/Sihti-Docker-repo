@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .filtering import normalize_domain
+from . import resolver as dns   # SERVE_POLL
 
 log = logging.getLogger("sihti.web")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -562,6 +563,6 @@ def start_web(app, host, port, tls_context=None):
     srv = WebServer((host, port), make_handler(app))
     srv.tls_context = tls_context
     srv.certs = app.certs if tls_context else None
-    threading.Thread(target=srv.serve_forever, daemon=True, name="web").start()
+    threading.Thread(target=srv.serve_forever, args=(dns.SERVE_POLL,), daemon=True, name="web").start()
     log.info("käyttöliittymä: %s://%s:%d/", "https" if tls_context else "http", host, port)
     return srv

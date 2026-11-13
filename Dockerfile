@@ -29,8 +29,11 @@ USER sihti
 VOLUME ["/data"]
 EXPOSE 53/udp 53/tcp 4000/tcp
 
-# Väljät rajat hitaille laitteille (Pi Zero/3): käynnistykselle minuutti aikaa
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+# Väljät rajat hitaille laitteille (Pi Zero/3): käynnistykselle minuutti aikaa. Jokainen tarkistus käynnistää
+# uuden Python-tulkin ja Docker tallentaa tuloksen levylle, joten jatkuvassa käytössä väli on 5 min.
+# Aloitusajan sisällä tarkistetaan 5 s välein, jotta tila on healthy heti käynnistyksen jälkeen
+# (--start-interval: Docker 25+; vanhempi Docker ohittaa sen ja tarkistaa ensimmäisen kerran 5 min kohdalla).
+HEALTHCHECK --interval=300s --timeout=10s --start-period=60s --start-interval=5s --retries=3 \
   CMD ["python3", "-m", "sihti.healthcheck"]
 
 CMD ["python3", "-m", "sihti"]
