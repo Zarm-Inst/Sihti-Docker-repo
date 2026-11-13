@@ -4,9 +4,10 @@
 const $ = (s) => document.querySelector(s);
 const fmt = new Intl.NumberFormat("fi-FI");
 const pctFmt = new Intl.NumberFormat("fi-FI", { style: "percent", maximumFractionDigits: 1 });
-const STATUS_LABEL = { estetty: "Estetty", sallittu: "Sallittu", valimuisti: "Välimuisti", virhe: "Virhe" };
-const REASON_LABEL = { lista: "Estolista", oma: "Oma esto", lauseke: "Lauseke", sallinta: "Oma sallinta",
-  "ylävirta": "Ylävirta ei vastannut", ohitus: "Ohituksen esto", cname: "Piilotettu seurain (CNAME)", paikallinen: "Paikallinen nimi, reititin" };
+// Välimuistista vastattu pyyntö on käyttäjälle sama asia kuin sallittu; ero näkyy vain rivin vihjetekstissä
+const STATUS_LABEL = { estetty: "Estetty", sallittu: "Sallittu", valimuisti: "Sallittu", virhe: "Virhe" };
+const REASON_LABEL = { lista: "Estolista", oma: "Oma esto", lauseke: "Oma estolauseke", sallinta: "Oma sallinta",
+  "ylävirta": "Nimipalvelin ei vastannut", ohitus: "Suodatuksen kiertäminen", cname: "Piilotettu seuranta", paikallinen: "Kotiverkon laite" };
 
 // Lyhyt nimi listan osoitteesta: raw.githubusercontent.com/StevenBlack/hosts/master/hosts -> StevenBlack/hosts
 function listName(url) {
@@ -74,6 +75,33 @@ function flash(node, text) {
   node._t = setTimeout(() => (node.textContent = ""), 4000);
 }
 
+// Ilmoitus sivun alareunassa, haluttaessa toimintopainikkeella (esim. Kumoa)
+let toastT;
+function toast(text, action, onAction) {
+  const t = $("#toast");
+  t.replaceChildren(el("span", { text }));
+  if (action) t.append(el("button", { class: "btn", type: "button", text: action, onclick: () => { t.hidden = true; onAction(); } }));
+  t.hidden = false;
+  clearTimeout(toastT);
+  toastT = setTimeout(() => (t.hidden = true), action ? 10000 : 6000);
+}
+
+// Vahvistuskysymys sivun sisällä. choices: [[arvo, teksti, luokka]]. Palauttaa valitun arvon,
+// tai null, jos käyttäjä peruutti (painike tai Esc).
+function ask(text, choices) {
+  const d = $("#ask");
+  $("#ask-text").textContent = text;
+  return new Promise((resolve) => {
+    const done = (v) => { d.onclose = null; d.close(); resolve(v); };
+    $("#ask-btns").replaceChildren(
+      ...choices.map(([v, label, cls]) => el("button", { class: "btn " + (cls || ""), type: "button", text: label, onclick: () => done(v) })),
+      el("button", { class: "btn", type: "button", text: "Peruuta", onclick: () => done(null) }));
+    d.onclose = () => resolve(null);
+    d.showModal();
+  });
+}
+
+const clockFmt = (ts) => new Date(ts * 1000).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" });
 const timeFmt = (ts) => new Date(ts * 1000).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const dayFmt = (ts) => new Date(ts * 1000).toLocaleDateString("fi-FI", { day: "numeric", month: "numeric" });
 const dateFmt = (ts) => ts ? new Date(ts * 1000).toLocaleString("fi-FI", { day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit" }) : "ei koskaan";
@@ -122,6 +150,7 @@ function route() {
   document.querySelectorAll(".tabs a").forEach((a) => {
     if (a.getAttribute("href") === `#${name}`) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
+  if (status) renderState();   // varoituspalkki näkyy muissa näkymissä kuin yleiskuvassa
   ({ yleiskuva: loadOverview, loki: loadLog, saannot: loadRules, listat: loadLists, asetukset: loadSettings })[name]();
 }
 window.addEventListener("hashchange", route);
@@ -149,50 +178,79 @@ async function loadStatus() {
   try { status = await api("/api/status"); } catch { return; }
   // Palvelin päivitettiin: ladataan uusi käyttöliittymä, ettei vanha koodi näytä vääriä tietoja
   if (uiVersion && status.ui_version && status.ui_version !== uiVersion) { location.reload(); return; }
-  const dot = $("#state-dot"), txt = $("#state-text"), btn = $("#toggle");
-  dot.className = "dot " + (status.blocking ? "on" : "off");
-  if (status.blocking) txt.textContent = "Suodatus päällä";
-  else if (status.blocking_enabled && status.pause_until) txt.textContent = "Tauolla klo " + new Date(status.pause_until * 1000).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" }) + " asti";
-  else txt.textContent = "Suodatus pois";
-  btn.textContent = status.blocking ? "Poista käytöstä" : "Ota käyttöön";
-  $("#pause").hidden = !status.blocking;
+  renderState();
   showVersion(status.version);
   renderLogWarning();
   if (current === "yleiskuva") { renderHeadline(); renderKpis(); }
   if (current === "listat" && status.lists_updating && !listWait) { listState = listStateFrom(status); waitForLists(); }
 }
-// Kyselylokin tallennusvirhe (LOG-009): varoitus Yleiskuvaan ja Lokiin. Pelkät pudotetut rivit
-// (ruuhka tai ohimennyt virhe) kerrotaan vain Loki-näkymässä.
+// Suodatuksen tila yläpalkkiin. Kun suodatus on pois tai tauolla, siitä kertoo lisäksi koko
+// sivun levyinen varoituspalkki (yleiskuvassa tilakortti), jotta tila ei jää pelkän väripisteen varaan.
+const isPaused = () => !status.blocking && status.blocking_enabled && !!status.pause_until;
+function renderState() {
+  const dot = $("#state-dot"), txt = $("#state-text");
+  dot.className = "dot " + (status.blocking ? "on" : "off");
+  if (status.blocking) txt.textContent = "Suodatus päällä";
+  else if (isPaused()) txt.textContent = `Tauolla klo ${clockFmt(status.pause_until)} asti`;
+  else txt.textContent = "Suodatus pois";
+  $("#toggle").textContent = status.blocking ? "Poista käytöstä" : "Ota käyttöön";
+  $("#pause").hidden = !status.blocking;
+  $("#off-bar").hidden = status.blocking || current === "yleiskuva";
+  $("#off-text").textContent = isPaused()
+    ? `Suodatus on tauolla klo ${clockFmt(status.pause_until)} asti. Sivustoja ei estetä sinä aikana.`
+    : "Suodatus on pois päältä. Sivustoja ei estetä.";
+}
+// Selaushistorian tallennusvirhe (LOG-009): varoitus Yleiskuvaan ja Selaushistoriaan. Pelkät pudotetut rivit
+// (ruuhka tai ohimennyt virhe) kerrotaan vain Selaushistoria-näkymässä.
 function renderLogWarning() {
   const err = status.log_error, dropped = status.log_dropped || 0;
-  const missing = dropped ? `Käynnistyksen jälkeen kirjaamatta on jäänyt ${plural(dropped, "kysely", "kyselyä")}.` : "";
+  const missing = dropped ? `Käynnistyksen jälkeen kirjaamatta on jäänyt ${plural(dropped, "tapahtuma", "tapahtumaa")}.` : "";
   document.querySelectorAll(".log-warning").forEach((p) => {
     let text = "";
-    if (err) text = `Kyselyloki ei tallennu: ${err}. DNS toimii normaalisti, ja Sihti yrittää tallentaa uudelleen. ${missing}`;
+    if (err) text = `Selaushistoria ei tallennu: ${err}. Verkko ja suodatus toimivat normaalisti, ja Sihti yrittää tallentaa uudelleen. ${missing}`;
     else if (dropped && p.closest("#v-loki")) text = `${missing} Syynä on ruuhka tai ohimennyt tallennusvirhe.`;
     p.textContent = text.trim();
     p.hidden = !text;
   });
 }
-$("#toggle").addEventListener("click", async () => {
-  await api("/api/blocking", { method: "POST", body: { enabled: !status.blocking } });
+async function setBlocking(body) {
+  try { await api("/api/blocking", { method: "POST", body }); } catch (e) { toast(e.message); }
   refreshStatus();
+}
+// Kokonaan pois kytkeminen kysytään erikseen ja tarjotaan ensin taukoa, joka päättyy itsestään
+$("#toggle").addEventListener("click", async () => {
+  if (!status.blocking) return setBlocking({ enabled: true });
+  const choice = await ask("Poistetaanko suodatus käytöstä kokonaan? Sivustoja ei estetä, ennen kuin otat suodatuksen itse takaisin käyttöön. Tauko päättyy itsestään.",
+    [["pause", "Tauota 30 min", "primary"], ["off", "Poista käytöstä", "warn"]]);
+  if (choice === "pause") setBlocking({ pause_seconds: 1800 });
+  else if (choice === "off") setBlocking({ enabled: false });
 });
+document.querySelectorAll(".turn-on").forEach((b) => b.addEventListener("click", () => setBlocking({ enabled: true })));
 $("#pause").addEventListener("change", async (e) => {
   if (!e.target.value) return;
-  await api("/api/blocking", { method: "POST", body: { pause_seconds: Number(e.target.value) } });
+  const seconds = Number(e.target.value);
   e.target.value = "";
-  refreshStatus();
+  setBlocking({ pause_seconds: seconds });
 });
 
 /* ---------- yleiskuva ---------- */
+// Tilakortti: yhdellä silmäyksellä, onko suodatus päällä, ja vuorokauden luvut lauseena
 function renderHeadline() {
   if (!status) return;
-  const p = $("#headline");
+  const card = $("#status-card"), title = $("#status-title"), p = $("#headline");
+  card.className = "status-card " + (status.blocking ? "on" : "off");
+  card.querySelector(".turn-on").hidden = status.blocking;
   p.replaceChildren();
-  if (!status.total) { p.textContent = "Ei vielä kyselyjä. Aseta tämän laitteen osoite reitittimesi DNS-palvelimeksi."; return; }
+  if (!status.blocking) {
+    title.textContent = isPaused() ? `Suodatus on tauolla klo ${clockFmt(status.pause_until)} asti` : "Suodatus on pois päältä";
+    p.textContent = "Sivustoja ei estetä. Mainokset, seuranta ja itse estämäsi sivustot pääsevät läpi.";
+    return;
+  }
+  title.textContent = "Suodatus on päällä";
+  if (!status.total) { p.textContent = "Sihti ei ole vielä nähnyt yhtään tapahtumaa. Aseta tämän laitteen osoite reitittimesi DNS-palvelimeksi."; return; }
   const pct = Math.round((status.blocked / status.total) * 1000) / 10;
-  p.append("Viimeisen vuorokauden aikana ", el("b", { text: fmt.format(status.total) }), " kyselyä, joista ",
+  p.append(el("b", { text: plural(status.clients, "laite", "laitetta") }), " käytti verkkoa viimeisen vuorokauden aikana. Tapahtumia oli ",
+    el("b", { text: fmt.format(status.total) }), ", joista ",
     el("b", { class: "caught", text: `${fmt.format(status.blocked)} (${String(pct).replace(".", ",")} %)` }), " jäi sihtiin.");
 }
 
@@ -205,8 +263,8 @@ function renderKpis() {
   $("#k-block").textContent = fmt.format(s.blocked);
   $("#k-pass-pct").textContent = decided ? pctFmt.format(s.passed / decided) : "";
   $("#k-block-pct").textContent = decided ? pctFmt.format(s.blocked / decided) : "";
-  $("#k-pass-sub").textContent = plural(s.passed_domains, "eri verkkotunnus", "eri verkkotunnusta");
-  $("#k-block-sub").textContent = plural(s.blocked_domains, "eri verkkotunnus", "eri verkkotunnusta");
+  $("#k-pass-sub").textContent = plural(s.passed_domains, "eri sivusto", "eri sivustoa");
+  $("#k-block-sub").textContent = plural(s.blocked_domains, "eri sivusto", "eri sivustoa");
 
   const loading = s.lists_updating && !s.domains_on_lists;
   $("#k-lists").textContent = loading ? "ladataan…" : fmt.format(s.domains_on_lists);
@@ -231,14 +289,14 @@ function renderKpis() {
 
   const facts = [
     [fmt.format(s.cached), "vastausta välimuistista"],
-    [fmt.format(s.errors), "kyselyä epäonnistui"],
-    [dateFmt(s.last_update), "listat päivitetty"],
+    [fmt.format(s.errors), "tapahtumaa epäonnistui"],
+    [dateFmt(s.last_update), "estolistat päivitetty"],
     [durationFmt(s.uptime), "käynnissä"],
   ];
   $("#facts").replaceChildren(...facts.map(([v, k]) => el("div", {}, el("dt", { text: k }), el("dd", { text: v }))));
 }
 
-// Yleiskuvan linkit avaavat kyselylokin valmiiksi suodatettuna
+// Yleiskuvan linkit avaavat selaushistorian valmiiksi suodatettuna
 function presetLog(status = "", search = "") {
   $("#log-status").value = status;
   $("#log-search").value = search;
@@ -249,7 +307,7 @@ async function loadOverview() {
   if (status) { renderHeadline(); renderKpis(); }
   const [tl, top] = await Promise.all([api("/api/timeline?hours=24"), api("/api/top?hours=24")]);
   drawChart(tl);
-  for (const [id, rows, logStatus] of [["top-blocked", top.blocked, "estetty"], ["top-domains", top.domains, "sallittu"], ["top-clients", top.clients, ""]]) {
+  for (const [id, rows, logStatus] of [["top-blocked", top.blocked, "estetty"], ["top-domains", top.domains, "lapaisi"], ["top-clients", top.clients, ""]]) {
     const ol = $("#" + id);
     if (!rows.length) { ol.replaceChildren(el("li", { class: "empty", text: "Ei vielä tietoja." })); continue; }
     const max = rows[0].count;
@@ -331,24 +389,40 @@ async function renderLog() {
   if ($("#log-status").value) q.set("status", $("#log-status").value);
   const rows = await api("/api/log?" + q);
   const body = $("#log-body");
-  if (!rows.length) { body.replaceChildren(el("tr", {}, el("td", { colspan: 8, class: "empty", text: "Ei kyselyjä näillä ehdoilla." }))); return; }
+  if (!rows.length) { body.replaceChildren(el("tr", {}, el("td", { colspan: 6, class: "empty", text: "Ei tapahtumia näillä ehdoilla." }))); return; }
   body.replaceChildren(...rows.map((r) => {
-    const tag = el("span", { class: "tag " + r.status, text: STATUS_LABEL[r.status] || r.status });
+    const tag = el("span", { class: "tag " + (r.status === "valimuisti" ? "sallittu" : r.status), text: STATUS_LABEL[r.status] || r.status });
     const why = el("td", { class: "why", text: reasonText(r.reason, r.detail) });
     if (r.detail) why.title = reasonTitle(r.reason, r.detail);
     const action = r.status === "estetty"
-      ? el("button", { class: "linkbtn", text: "Salli", onclick: () => quickRule("allow", r.domain) })
-      : el("button", { class: "linkbtn", text: "Estä", onclick: () => quickRule("deny", r.domain) });
-    return el("tr", { class: r.status },
+      ? el("button", { class: "linkbtn", text: "Salli", onclick: () => quickRule("allow", r.domain, renderLog) })
+      : el("button", { class: "linkbtn", text: "Estä", onclick: () => quickRule("deny", r.domain, renderLog) });
+    // Tekniset tiedot (kyselytyyppi, käsittelyaika, välimuisti) vain rivin vihjetekstissä
+    const tech = [`Tyyppi ${r.qtype}`];
+    if (r.ms != null) tech.push(`${r.ms} ms`);
+    if (r.status === "valimuisti") tech.push("vastaus välimuistista");
+    return el("tr", { class: r.status, title: tech.join(" · ") },
       el("td", { text: timeFmt(r.ts) }), el("td", { text: r.client }), el("td", { class: "dom", text: r.domain }),
-      el("td", { text: r.qtype }), el("td", {}, tag), why, el("td", { class: "r", text: r.ms ?? "" }), el("td", {}, action));
+      el("td", {}, tag), why, el("td", {}, action));
   }));
 }
-async function quickRule(kind, domain) {
-  const verb = kind === "allow" ? "Sallitaanko" : "Estetäänkö";
-  if (!confirm(`${verb} ${domain} ja sen aliverkkotunnukset?`)) return;
-  try { await api("/api/custom", { method: "POST", body: { kind, value: domain } }); renderLog(); }
-  catch (e) { alert(e.message); }
+// Sallii tai estää sivuston yhdellä painalluksella. Vahvistusta ei kysytä: muutoksen voi kumota
+// ilmoituksesta. after() päivittää näkymän muutoksen ja kumoamisen jälkeen.
+async function quickRule(kind, domain, after = () => {}) {
+  let r;
+  try { r = await api("/api/custom", { method: "POST", body: { kind, value: domain } }); }
+  catch (e) { toast(e.message); return; }
+  if (!r.added.length) {
+    toast(r.existing.length ? `${domain} oli jo ${kind === "allow" ? "sallittujen" : "estettyjen"} listalla.` : `${domain} ei kelpaa osoitteeksi.`);
+    return;
+  }
+  const value = r.added[0];
+  toast(`${value} on nyt ${kind === "allow" ? "sallittu" : "estetty"}. Muutos voi näkyä laitteilla vasta hetken kuluttua.`, "Kumoa", async () => {
+    try { await api("/api/custom", { method: "DELETE", body: { kind, value } }); toast("Muutos kumottu."); }
+    catch (e) { toast(e.message); }
+    after();
+  });
+  after();
 }
 let searchT;
 $("#log-search").addEventListener("input", () => { clearTimeout(searchT); searchT = setTimeout(renderLog, 300); });
@@ -359,10 +433,16 @@ async function loadRules() {
   const d = await api("/api/custom");
   for (const kind of ["allow", "deny", "deny_regex"]) {
     const ul = $("#list-" + kind);
-    if (!d[kind].length) { ul.replaceChildren(el("li", { class: "empty", text: "Ei sääntöjä." })); continue; }
+    if (!d[kind].length) { ul.replaceChildren(el("li", { class: "empty", text: "Ei vielä yhtään." })); continue; }
     ul.replaceChildren(...d[kind].map((v) => el("li", {}, el("span", { text: v }),
       el("button", { class: "linkbtn", text: "Poista", "aria-label": `Poista ${v}`, onclick: async () => {
-        await api("/api/custom", { method: "DELETE", body: { kind, value: v } }); loadRules();
+        try { await api("/api/custom", { method: "DELETE", body: { kind, value: v } }); }
+        catch (e) { toast(e.message); return; }
+        loadRules();
+        toast(`${v} poistettu.`, "Kumoa", async () => {
+          try { await api("/api/custom", { method: "POST", body: { kind, value: v } }); } catch (e) { toast(e.message); }
+          if (current === "saannot") loadRules();
+        });
       } }))));
   }
 }
@@ -384,16 +464,23 @@ document.querySelectorAll("form.add").forEach((f) => {
     } catch (err) { flash(msg, err.message); }
   });
 });
-$("#check-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
+// "Miksi jokin sivu ei aukea?" (yleiskuvassa): kertoo, estääkö Sihti osoitteen, ja tarjoaa korjauksen.
+// Kenttään voi liittää koko osoitteen selaimesta; palvelin siistii sen.
+async function checkDomain() {
   const out = $("#check-result");
   let r;
   try { r = await api("/api/check?domain=" + encodeURIComponent($("#check-domain").value)); }
-  catch (err) { out.className = "no"; out.textContent = err.message; return; }
+  catch (err) { out.className = "no"; out.textContent = err.message === "virheellinen verkkotunnus" ? "Tämä ei näytä sivuston osoitteelta. Kokeile esim. example.com." : err.message; return; }
   out.className = r.blocked ? "no" : "ok";
-  const why = r.reason ? ` – ${reasonText(r.reason, r.detail)}` : "";
-  out.textContent = r.blocked ? `${r.domain} estetään${why}.` : `${r.domain} päästetään läpi${why}.`;
-});
+  const why = r.reason ? ` (${reasonText(r.reason, r.detail)})` : "";
+  const fix = r.blocked
+    ? el("button", { class: "btn", type: "button", text: "Salli tämä sivusto", onclick: () => quickRule("allow", r.domain, checkDomain) })
+    : el("button", { class: "btn", type: "button", text: "Estä tämä sivusto", onclick: () => quickRule("deny", r.domain, checkDomain) });
+  out.replaceChildren(r.blocked
+    ? `Sihti estää sivuston ${r.domain}${why}. `
+    : `Sihti ei estä sivustoa ${r.domain}${why}. Jos sivu ei silti aukea, vika on muualla. `, fix);
+}
+$("#check-form").addEventListener("submit", (e) => { e.preventDefault(); checkDomain(); });
 
 /* ---------- estolistat ---------- */
 // Päivityksen tila: {updating, progress, build_error}. Seurataan kevyellä rajapinnalla, joka ei
@@ -419,8 +506,8 @@ async function loadLists(data, state) {
   if (off) parts.push(`${off} pois päältä`);
   if (waiting) parts.push(`${waiting} ei vielä käytössä`);
   const rows = used.reduce((s, l) => s + (l.count || 0), 0);
-  listBase = `${lists.length} listaa: ${parts.join(", ")}. Käytössä olevilla listoilla yhteensä ${fmt.format(rows)} nimeä`
-    + (status?.domains_on_lists ? `, joista ${fmt.format(status.domains_on_lists)} eri nimeä (sama nimi useammalla listalla on estossa vain kerran)` : "") + "."
+  listBase = `${lists.length} listaa: ${parts.join(", ")}. Käytössä olevilla listoilla yhteensä ${fmt.format(rows)} osoitetta`
+    + (status?.domains_on_lists ? `, joista ${fmt.format(status.domains_on_lists)} eri osoitetta (sama osoite useammalla listalla on estossa vain kerran)` : "") + "."
     + (status?.next_update ? ` Seuraava automaattinen päivitys ${dateFmt(Math.max(status.next_update, Date.now() / 1000))}.` : "");
   if (state) listState = state;   // juuri haettu tila muutoksen jälkeen
   else if (!listWait) listState = listStateFrom(status) || listState;   // näkymään tultaessa
@@ -430,11 +517,11 @@ async function loadLists(data, state) {
     const cb = el("input", { type: "checkbox", "aria-label": "Käytössä" });
     cb.checked = l.enabled;
     cb.addEventListener("change", async () => listsChanged(await api("/api/lists", { method: "PATCH", body: { url: l.url, enabled: cb.checked } })));
-    const meta = el("div", { class: "meta" }, `${fmt.format(l.count || 0)} nimeä`);
+    const meta = el("div", { class: "meta" }, `${fmt.format(l.count || 0)} osoitetta`);
     if (l.in_use && l.unique != null && l.count) meta.append(`, joista ${fmt.format(l.unique)} vain tällä listalla`);
     meta.append(` · päivitetty ${dateFmt(l.updated)}`);
     if (l.skipped_until) {
-      meta.append(" · ", el("span", { class: "skip", text: `ohitetaan, koska kaikki nimet ovat muilla listoilla; tarkistetaan uudelleen ${dayFmt(l.skipped_until)}` }),
+      meta.append(" · ", el("span", { class: "skip", text: `ohitetaan, koska kaikki osoitteet ovat muilla listoilla; tarkistetaan uudelleen ${dayFmt(l.skipped_until)}` }),
         " ", el("button", { class: "linkbtn", text: "Käytä aina", onclick: () => setKeep(l.url, true) }));
     } else if (l.keep) {
       meta.append(" · aina käytössä ", el("button", { class: "linkbtn", text: "Salli ohitus", onclick: () => setKeep(l.url, false) }));
@@ -444,7 +531,8 @@ async function loadLists(data, state) {
     if (l.error) meta.append(" · ", el("span", { class: "err", text: "viimeisin lataus epäonnistui: " + l.error }));
     return el("li", { class: !l.enabled ? "off" : l.in_use ? "" : "skipped" }, cb, el("div", { class: "url", text: l.url }),
       el("button", { class: "linkbtn", text: "Poista", onclick: async () => {
-        if (confirm("Poistetaanko lista?")) listsChanged(await api("/api/lists", { method: "DELETE", body: { url: l.url } }));
+        if (await ask(`Poistetaanko lista ${listName(l.url)}?`, [["yes", "Poista lista", "warn"]]))
+          listsChanged(await api("/api/lists", { method: "DELETE", body: { url: l.url } }));
       } }), meta);
   }));
 }
@@ -455,7 +543,7 @@ async function setKeep(url, keep) {
 $("#list-add").addEventListener("submit", async (e) => {
   e.preventDefault();
   try { listsChanged(await api("/api/lists", { method: "POST", body: { url: $("#list-url").value } })); $("#list-url").value = ""; }
-  catch (err) { alert(err.message); }
+  catch (err) { toast(err.message); }
 });
 $("#list-update").addEventListener("click", async () => {
   await api("/api/lists/update", { method: "POST" });
@@ -516,6 +604,8 @@ async function loadTls() {
   const state = $("#tls-state"), info = $("#tls-info");
   $("#tls-ca").hidden = !(t.enabled && t.ca_fingerprint);
   $("#tls-renew").hidden = !(t.enabled && !t.custom);
+  $("#tls-tech").hidden = !t.enabled;
+  $("#tls-fp-hint").hidden = !t.ca_fingerprint;
   if (!t.enabled) {
     state.textContent = "HTTPS ei ole käytössä. Ota se käyttöön asetuksella \"https\": true ja varmista, että openssl on asennettu.";
     info.replaceChildren();
@@ -535,6 +625,26 @@ async function loadTls() {
   if (t.ca_fingerprint) rows.push(["Varmentajan sormenjälki", t.ca_fingerprint, "fp"]);
   info.replaceChildren(...rows.flatMap(([k, v, c]) => [el("dt", { text: k }), el("dd", { text: v, class: c || "" })]));
 }
+// Varmentajan asennusohje: tämän laitteen ohje avataan valmiiksi ja nostetaan ensimmäiseksi.
+// Työpöydän Firefox käyttää omaa varmennesäilöään, joten sille näytetään Firefoxin ohje.
+function thisDevice() {
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return "ios";
+  if (/Android/.test(ua)) return "android";
+  if (/Firefox\//.test(ua)) return "firefox";
+  if (/Windows/.test(ua)) return "windows";
+  if (/Macintosh|Mac OS X/.test(ua)) return "macos";
+  if (/Linux|X11/.test(ua)) return "linux";
+  return "";
+}
+(() => {
+  const guide = document.querySelector(`#tls-guides details[data-os="${thisDevice()}"]`);
+  if (!guide) return;
+  guide.open = true;
+  $("#tls-guides").prepend(guide);
+  $("#tls-this").hidden = false;
+})();
+
 $("#tls-renew").addEventListener("click", async (e) => {
   e.target.disabled = true;
   try { await api("/api/tls/renew", { method: "POST" }); flash($("#tls-msg"), "Uusi varmenne otettu käyttöön."); loadTls(); }
@@ -542,6 +652,8 @@ $("#tls-renew").addEventListener("click", async (e) => {
   e.target.disabled = false;
 });
 
+// Virheellinen kenttä suljetuissa lisäasetuksissa: avataan ne, jotta selain voi näyttää virheen
+$("#settings").addEventListener("invalid", (e) => { if (e.target.closest("#adv-settings")) $("#adv-settings").open = true; }, true);
 $("#settings").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
@@ -574,18 +686,18 @@ $("#backup-save").addEventListener("click", async () => {
 $("#backup-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   e.target.value = "";
-  if (!file || !confirm("Palautetaanko varmuuskopio? Nykyiset asetukset, estolistat ja omat säännöt korvataan sen sisällöllä.")) return;
+  if (!file || !await ask("Palautetaanko varmuuskopio? Nykyiset asetukset, estolistat sekä sallitut ja estetyt sivustot korvataan sen sisällöllä.", [["yes", "Palauta", "primary"]])) return;
   try {
     const r = await api("/api/backup", { method: "POST", body: JSON.parse(await file.text()) });
-    flash($("#maint-msg"), `Palautettu: ${r.lists} listaa, ${r.rules} omaa sääntöä` + (r.skipped.length ? `, ohitettiin ${r.skipped.length} virheellistä` : "") + ". Listat päivitetään taustalla.");
+    flash($("#maint-msg"), `Palautettu: ${r.lists} listaa, ${r.rules} sallittua tai estettyä sivustoa` + (r.skipped.length ? `, ohitettiin ${r.skipped.length} virheellistä` : "") + ". Listat päivitetään taustalla.");
     loadSettings();
   } catch (err) { flash($("#maint-msg"), err instanceof SyntaxError ? "Tiedosto ei ole kelvollinen varmuuskopio." : err.message); }
 });
 $("#clear-cache").addEventListener("click", async () => { await api("/api/cache/clear", { method: "POST" }); flash($("#maint-msg"), "Välimuisti tyhjennetty."); });
 $("#clear-log").addEventListener("click", async () => {
-  if (!confirm("Poistetaanko koko kyselyloki pysyvästi?")) return;
+  if (!await ask("Poistetaanko koko selaushistoria pysyvästi? Tätä ei voi kumota.", [["yes", "Poista selaushistoria", "warn"]])) return;
   await api("/api/log/clear", { method: "POST" });
-  flash($("#maint-msg"), "Kyselyloki poistettu.");
+  flash($("#maint-msg"), "Selaushistoria poistettu.");
 });
 
 boot();

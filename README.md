@@ -14,12 +14,13 @@ Kirjoitettu pelkällä Pythonin standardikirjastolla: ei riippuvuuksia, ei tieto
 - Ohitusten esto: Firefoxin oma salattu DNS (DoH) ja iCloud Private Relay kytkeytyvät pois tässä verkossa, joten niitä käyttävät laitteet eivät ohita suodatusta
 - Vastaa vain lähiverkon laitteille, joten Pi ei toimi avoimena DNS-palvelimena, vaikka portti 53 aukeaisi vahingossa internetiin
 - Paikalliset nimet (esim. `nas.lan` tai pelkkä `nas`) ja lähiverkon käänteishaut kysytään reitittimeltä
-- Varmuuskopio: asetukset, estolistat ja omat säännöt yhtenä tiedostona, palautus käyttöliittymästä
+- Varmuuskopio: asetukset, estolistat sekä sallitut ja estetyt sivustot yhtenä tiedostona, palautus käyttöliittymästä
 - Välimuisti, joka noudattaa vastausten TTL-arvoja
-- Kyselyloki SQLiteen, haku ja suodatus, estä/salli yhdellä napilla; jokaisen eston syy näkyy lokissa (mikä estolista, oma sääntö tai lauseke)
-- Yleiskuva: tilastoruudut läpäisseistä ja estetyistä kyselyistä (määrä, osuus ja eri verkkotunnukset), estolistojen nimien kokonaismäärä, vuorokauden kaavio, estetyimmät nimet ja aktiivisimmat laitteet
+- Selaushistoria (kyselyloki SQLiteen), haku ja suodatus, estä/salli yhdellä napilla ja kumoa ilmoituksesta; jokaisen eston syy näkyy rivillä (mikä estolista, oma sääntö tai lauseke)
+- "Miksi jokin sivu ei aukea?": Yleiskuvan tarkistus kertoo, estääkö Sihti osoitteen, ja sen voi sallia samasta paikasta
+- Yleiskuva: tilakortti (onko suodatus päällä), tilastoruudut läpäisseistä ja estetyistä kyselyistä (määrä, osuus ja eri sivustot), estolistojen osoitteiden kokonaismäärä, vuorokauden kaavio, estetyimmät nimet ja aktiivisimmat laitteet
 - Suodatuksen tauotus (5 min / 30 min / 1 h) ja kytkin
-- Salasanasuojattu web-käyttöliittymä suomeksi, vaalea ja tumma teema: automaattisesti laitteen asetuksen mukaan tai valittuna yläpalkista (valinta muistetaan selaimessa)
+- Salasanasuojattu web-käyttöliittymä suomeksi, vaalea ja tumma teema: automaattisesti laitteen asetuksen mukaan tai valittuna asetuksista (valinta muistetaan selaimessa). Käyttöliittymä on kirjoitettu arkikielellä, ja tekniset asetukset ovat erillisessä Lisäasetukset-osiossa
 - HTTPS omalla, automaattisesti uusiutuvalla varmenteella (http-osoitteet ohjataan https:ään)
 
 ## Asennus Dockerilla (suositus)
@@ -164,7 +165,7 @@ Sihti luo varmenteet itse:
 
 Varmenne kattaa nimet `localhost`, `<nimi>`, `<nimi>.local`, `<nimi>.lan`, `<nimi>.home` sekä Pi:n IP-osoitteet. Lisäksi varmenteeseen lisätään automaattisesti lähiverkko-osoite tai paikallinen nimi, jolla käyttöliittymä avataan. Muita nimiä voi lisätä asetuksella `tls_extra_names`.
 
-**Muut laitteet:** asenna varmentaja kerran jokaiselle laitteelle, jolla käytät käyttöliittymää: *Asetukset → Suojattu yhteys → Lataa varmentaja*. Samassa kohdassa on ohjeet Windowsille, macOS:lle, iPhonelle, Androidille, Linuxille ja Firefoxille. Tarkista, että varmentajan sormenjälki vastaa sivulla (ja `install.sh`:n lopussa) näkyvää. Ilman asennusta sivu toimii, mutta selain varoittaa.
+**Muut laitteet:** asenna varmentaja kerran jokaiselle laitteelle, jolla käytät käyttöliittymää: *Asetukset → Suojattu yhteys → Lataa varmentaja*. Samassa kohdassa on ohjeet Windowsille, macOS:lle, iPhonelle, Androidille, Linuxille ja Firefoxille; käytössä olevan laitteen ohje avautuu valmiiksi. Tarkista, että varmentajan sormenjälki vastaa sivun kohdassa *Tekniset tiedot* (ja `install.sh`:n lopussa) näkyvää. Ilman asennusta sivu toimii, mutta selain varoittaa.
 
 Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeudet 600). Sitä ei voi ladata käyttöliittymästä.
 
@@ -182,8 +183,8 @@ Varmentajan yksityinen avain on vain Pi:llä (`/var/lib/sihti/tls/ca.key`, oikeu
 | `upstreams` | Cloudflare, Quad9 | Ylävirran palvelimet, kokeillaan järjestyksessä |
 | `block_mode` | `null` | `null` = 0.0.0.0 / ::, `nxdomain` = nimeä ei ole |
 | `cache_size` | `10000` | Välimuistin nimien määrä (0 = pois) |
-| `log_retention_days` | `7` | Kyselylokin säilytysaika |
-| `log_queries` | `true` | Kyselylokin tallennus (pois = parempi yksityisyys) |
+| `log_retention_days` | `7` | Selaushistorian (kyselylokin) säilytysaika |
+| `log_queries` | `true` | Selaushistorian (kyselylokin) tallennus (pois = parempi yksityisyys) |
 | `lists` | yksi lista | Estolistojen osoitteet |
 | `update_interval_hours` | `24` | Listojen päivitysväli. Lasketaan viimeisimmästä päivityksestä, joka säilyy uudelleenkäynnistyksen yli; muutos tulee voimaan heti. Epäonnistunut päivitys yritetään uudelleen tunnin päästä |
 | `skip_redundant_lists` | `true` | Ohita listat, joiden kaikki nimet ovat muilla listoilla (tarkistetaan viikoittain uudelleen) |

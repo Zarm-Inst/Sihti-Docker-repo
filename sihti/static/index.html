@@ -46,11 +46,6 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
       <span id="state-dot" class="dot"></span>
       <span id="state-text">…</span>
       <button id="toggle" class="btn"></button>
-      <select id="theme" class="theme" aria-label="Teema" title="Teema">
-        <option value="auto">◐ Auto</option>
-        <option value="light">☀ Vaalea</option>
-        <option value="dark">☾ Tumma</option>
-      </select>
       <select id="pause" aria-label="Tauota suodatus" title="Tauko päättyy myös, jos Sihti tai laite käynnistyy uudelleen.">
         <option value="">Tauota…</option>
         <option value="300">5 min</option>
@@ -60,10 +55,16 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
     </div>
   </header>
 
+  <!-- Suodatus pois tai tauolla: näkyy kaikissa näkymissä paitsi yleiskuvassa, jossa tilakortti kertoo saman -->
+  <div id="off-bar" class="offbar" role="alert" hidden>
+    <span id="off-text"></span>
+    <button class="btn turn-on" type="button">Ota käyttöön</button>
+  </div>
+
   <nav class="tabs" aria-label="Näkymät">
     <a href="#yleiskuva">Yleiskuva</a>
-    <a href="#loki">Kyselyloki</a>
-    <a href="#saannot">Omat säännöt</a>
+    <a href="#loki">Selaushistoria</a>
+    <a href="#saannot">Sallitut ja estetyt</a>
     <a href="#listat">Estolistat</a>
     <a href="#asetukset">Asetukset</a>
   </nav>
@@ -71,26 +72,38 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
   <main>
     <!-- Yleiskuva -->
     <section id="v-yleiskuva" class="view">
-      <p class="lead" id="headline">Ladataan…</p>
+      <div id="status-card" class="status-card">
+        <p class="status-title" id="status-title">Ladataan…</p>
+        <p class="status-sub" id="headline"></p>
+        <button class="btn primary turn-on" type="button" hidden>Ota suodatus käyttöön</button>
+      </div>
       <p class="notice log-warning" role="status" hidden></p>
+
+      <form id="check-form" class="checker">
+        <label for="check-domain">Miksi jokin sivu ei aukea?</label>
+        <p class="hint">Kirjoita tai liitä sivun osoite, niin näet, estääkö Sihti sen.</p>
+        <div class="row"><input id="check-domain" placeholder="esim. example.com" autocapitalize="off" autocorrect="off" spellcheck="false" required><button class="btn">Tarkista</button></div>
+        <p id="check-result" aria-live="polite"></p>
+      </form>
+
       <div class="kpis" aria-label="Viimeisen vuorokauden luvut">
-        <a class="kpi" href="#loki" data-status="" title="Näytä kyselyloki">
-          <span class="kpi-label">Kyselyt 24 h</span>
+        <a class="kpi" href="#loki" data-status="" title="Näytä selaushistoria">
+          <span class="kpi-label">Tapahtumat 24 h</span>
           <span class="kpi-value" id="k-total">–</span>
           <span class="kpi-sub" id="k-total-sub"></span>
         </a>
-        <a class="kpi" href="#loki" data-status="lapaisi" title="Näytä läpäisseet kyselyt">
+        <a class="kpi" href="#loki" data-status="lapaisi" title="Näytä läpi päässeet tapahtumat">
           <span class="kpi-label"><span class="k ok"></span>Läpäisi</span>
           <span class="kpi-value"><span id="k-pass">–</span> <span class="pct" id="k-pass-pct"></span></span>
           <span class="kpi-sub" id="k-pass-sub"></span>
         </a>
-        <a class="kpi" href="#loki" data-status="estetty" title="Näytä estetyt kyselyt ja eston syyt">
+        <a class="kpi" href="#loki" data-status="estetty" title="Näytä estetyt tapahtumat ja eston syyt">
           <span class="kpi-label"><span class="k no"></span>Jäi sihtiin</span>
           <span class="kpi-value"><span id="k-block">–</span> <span class="pct" id="k-block-pct"></span></span>
           <span class="kpi-sub" id="k-block-sub"></span>
         </a>
         <a class="kpi" href="#listat" title="Näytä estolistat">
-          <span class="kpi-label">Nimiä estolistoilla</span>
+          <span class="kpi-label">Osoitteita estolistoilla</span>
           <span class="kpi-value" id="k-lists">–</span>
           <span class="kpi-sub" id="k-lists-sub"></span>
         </a>
@@ -98,27 +111,28 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
       <div class="split" id="split" role="img" hidden><span class="ok"></span><span class="no"></span></div>
       <div class="sieve">
         <div class="legend"><span class="k ok"></span>Läpäisi <span class="k no"></span>Jäi sihtiin</div>
-        <svg id="chart" role="img" aria-label="Kyselyt viimeisen vuorokauden aikana"></svg>
+        <svg id="chart" role="img" aria-label="Tapahtumat viimeisen vuorokauden aikana"></svg>
         <div class="axis" id="axis"></div>
       </div>
-      <dl class="facts" id="facts"></dl>
       <div class="tops">
         <div><h2>Useimmin estetyt</h2><ol id="top-blocked" class="toplist"></ol></div>
         <div><h2>Useimmin sallitut</h2><ol id="top-domains" class="toplist"></ol></div>
         <div><h2>Aktiivisimmat laitteet</h2><ol id="top-clients" class="toplist"></ol></div>
       </div>
+      <details class="adv">
+        <summary>Tekniset tiedot</summary>
+        <dl class="facts" id="facts"></dl>
+      </details>
     </section>
 
-    <!-- Loki -->
+    <!-- Selaushistoria (kyselyloki) -->
     <section id="v-loki" class="view" hidden>
       <div class="toolbar">
-        <input id="log-search" type="search" placeholder="Hae verkkotunnusta tai laitetta" aria-label="Haku">
-        <select id="log-status" aria-label="Tila">
+        <input id="log-search" type="search" placeholder="Hae sivustoa tai laitetta" aria-label="Haku">
+        <select id="log-status" aria-label="Näytä">
           <option value="">Kaikki</option>
           <option value="estetty">Estetyt</option>
-          <option value="lapaisi">Läpäisseet</option>
-          <option value="sallittu">Sallitut</option>
-          <option value="valimuisti">Välimuistista</option>
+          <option value="lapaisi">Läpi päässeet</option>
           <option value="virhe">Virheet</option>
         </select>
         <label class="check"><input id="log-live" type="checkbox" checked> Päivitä jatkuvasti</label>
@@ -126,46 +140,45 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
       <p class="notice log-warning" role="status" hidden></p>
       <div class="table-wrap">
         <table class="log">
-          <thead><tr><th>Aika</th><th>Laite</th><th>Verkkotunnus</th><th>Tyyppi</th><th>Tila</th><th>Syy</th><th class="r">ms</th><th></th></tr></thead>
+          <thead><tr><th>Aika</th><th>Laite</th><th>Sivusto</th><th>Tila</th><th>Syy</th><th></th></tr></thead>
           <tbody id="log-body"></tbody>
         </table>
       </div>
     </section>
 
-    <!-- Säännöt -->
+    <!-- Sallitut ja estetyt (omat säännöt) -->
     <section id="v-saannot" class="view" hidden>
-      <form id="check-form" class="checker">
-        <label for="check-domain">Testaa verkkotunnus</label>
-        <div class="row"><input id="check-domain" placeholder="esim. mainos.example.com" required><button class="btn">Testaa</button></div>
-        <p id="check-result" aria-live="polite"></p>
-      </form>
-      <p class="hint rules-hint">Voit liittää monta verkkotunnusta kerralla, yksi per rivi tai välilyönnein eroteltuina. Myös osoitteet (https://example.com/sivu), <code>*.example.com</code> ja hosts-tiedoston rivit kelpaavat – ne siistitään pelkiksi verkkotunnuksiksi.</p>
+      <p class="hint rules-hint">Kirjoita sivuston osoite, esim. <code>example.com</code>. Voit liittää myös koko osoitteen selaimesta tai monta osoitetta kerralla, yhden per rivi.</p>
       <div class="rules">
         <div class="rule-col">
           <h2>Sallitut</h2>
-          <p class="hint">Näitä ei estetä koskaan, eikä niiden aliverkkotunnuksia.</p>
-          <form class="add" data-kind="allow"><textarea rows="3" placeholder="verkkotunnus.fi&#10;toinen.example.com" required aria-label="Lisää sallittuja"></textarea><div class="add-row"><button class="btn">Salli</button><span class="msg" aria-live="polite"></span></div></form>
+          <p class="hint">Näitä sivustoja ei estetä koskaan, vaikka ne olisivat estolistalla.</p>
+          <form class="add" data-kind="allow"><textarea rows="3" placeholder="example.com" required aria-label="Lisää sallittuja"></textarea><div class="add-row"><button class="btn">Salli</button><span class="msg" aria-live="polite"></span></div></form>
           <ul class="chips" id="list-allow"></ul>
         </div>
         <div class="rule-col">
           <h2>Estetyt</h2>
-          <p class="hint">Estetään listoista riippumatta, myös aliverkkotunnukset.</p>
-          <form class="add" data-kind="deny"><textarea rows="3" placeholder="mainos.example.com&#10;*.seuranta.example.net" required aria-label="Lisää estettyjä"></textarea><div class="add-row"><button class="btn">Estä</button><span class="msg" aria-live="polite"></span></div></form>
+          <p class="hint">Nämä sivustot estetään aina kaikilta laitteilta.</p>
+          <form class="add" data-kind="deny"><textarea rows="3" placeholder="example.com" required aria-label="Lisää estettyjä"></textarea><div class="add-row"><button class="btn">Estä</button><span class="msg" aria-live="polite"></span></div></form>
           <ul class="chips" id="list-deny"></ul>
         </div>
+      </div>
+      <p class="hint rules-hint">Sääntö koskee myös sivuston alaosoitteita, esim. <code>kuvat.example.com</code>. Muutos voi näkyä laitteilla vasta hetken kuluttua.</p>
+      <details class="adv">
+        <summary>Lisäasetukset: estolausekkeet</summary>
         <div class="rule-col">
-          <h2>Estolausekkeet</h2>
-          <p class="hint">Säännöllinen lauseke, jota verrataan koko nimeen. Esim. <code>(^|\.)track</code></p>
+          <p class="hint">Säännöllinen lauseke, jota verrataan koko osoitteeseen. Esim. <code>(^|\.)track</code> estää kaikki osoitteet, joissa jokin osa alkaa sanalla track.</p>
           <form class="add" data-kind="deny_regex"><textarea rows="3" placeholder="yksi lauseke per rivi" required aria-label="Lisää lausekkeita"></textarea><div class="add-row"><button class="btn">Lisää</button><span class="msg" aria-live="polite"></span></div></form>
           <ul class="chips" id="list-deny_regex"></ul>
         </div>
-      </div>
+      </details>
     </section>
 
     <!-- Listat -->
     <section id="v-listat" class="view" hidden>
+      <p class="hint rules-hint">Estolista on valmis luettelo mainosten, seurannan tai haitallisten sivustojen osoitteista. Sihti estää kaikki käytössä olevien listojen osoitteet ja päivittää listat itse.</p>
       <div class="toolbar">
-        <form id="list-add" class="row grow"><input id="list-url" type="url" placeholder="https://… (hosts- tai verkkotunnuslista)" required aria-label="Listan osoite"><button class="btn">Lisää lista</button></form>
+        <form id="list-add" class="row grow"><input id="list-url" type="url" placeholder="Uuden listan osoite, https://…" required aria-label="Listan osoite"><button class="btn">Lisää lista</button></form>
         <button id="list-update" class="btn primary">Päivitä listat nyt</button>
       </div>
       <p class="hint" id="list-summary"></p>
@@ -176,63 +189,111 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
     <section id="v-asetukset" class="view" hidden>
       <form id="settings" class="settings">
         <fieldset>
-          <legend>Ylävirran DNS-palvelimet</legend>
-          <p class="hint">Yksi per rivi. Portti voi olla mukana, esim. <code>192.168.1.1:5353</code>.</p>
-          <textarea id="s-upstreams" rows="3"></textarea>
-        </fieldset>
-        <fieldset>
-          <legend>Estetyn nimen vastaus</legend>
-          <label class="radio"><input type="radio" name="block_mode" value="null"> Osoite 0.0.0.0 / :: <span class="hint">nopein, sovellukset luovuttavat heti</span></label>
-          <label class="radio"><input type="radio" name="block_mode" value="nxdomain"> Nimeä ei ole olemassa (NXDOMAIN)</label>
-        </fieldset>
-        <fieldset class="grid2">
-          <label>Lokin säilytys (päivää)<input id="s-retention" type="number" step="1" required></label>
-          <label>Välimuistin koko (nimeä)<input id="s-cache" type="number" step="1" required></label>
-          <label>Listojen päivitysväli (tuntia)<input id="s-interval" type="number" step="1" required></label>
-          <label class="check"><input id="s-log" type="checkbox"> Tallenna kyselyloki</label>
-        </fieldset>
-        <fieldset>
-          <legend>Päällekkäiset estolistat</legend>
-          <label class="check"><input id="s-skip" type="checkbox"> Ohita listat, joiden kaikki nimet ovat jo muilla listoilla</label>
-          <p class="hint">Nopeuttaa listojen päivitystä. Ohitetut listat tarkistetaan viikoittain ja otetaan automaattisesti takaisin käyttöön, jos niihin tulee nimiä, joita muilla listoilla ei ole. Yksittäisen listan voi pitää aina käytössä Estolistat-sivulta.</p>
-        </fieldset>
-        <fieldset>
-          <legend>Suojaus</legend>
-          <label class="check"><input id="s-bypass" type="checkbox"> Estä Firefoxin oma DNS ja iCloud Private Relay</label>
-          <p class="hint">Muuten Firefox ja Apple-laitteet voivat ohittaa tämän verkon suodatuksen. Apple-laitteet ilmoittavat, että verkko on kytkenyt Private Relayn pois. Esto on voimassa myös silloin, kun suodatus on tauolla tai pois päältä, jotta laitteet eivät siirry ohittamaan Sihtiä tauon aikana. Ohitusnimen voi sallia omalla sallinnalla.</p>
-          <label class="check"><input id="s-cname" type="checkbox"> Tunnista piilotetut seurantapalvelimet</label>
-          <p class="hint">Estää myös nimet, jotka osoittavat (CNAME) estettyyn nimeen, esim. sivuston oman aliverkkotunnuksen taakse piilotetun seurannan.</p>
-          <label class="check"><input id="s-local-only" type="checkbox"> Vastaa vain lähiverkon laitteille</label>
-          <p class="hint">Sihti ei toimi avoimena DNS-palvelimena, vaikka portti 53 aukeaisi vahingossa internetiin. Lähiverkon IPv4- ja IPv6-osoitteet sallitaan automaattisesti.</p>
+          <legend>Selaushistoria</legend>
+          <label class="check"><input id="s-log" type="checkbox"> Tallenna selaushistoria: mitä sivustoja laitteet avaavat</label>
+          <p class="hint">Ilman sitä Yleiskuva ja Selaushistoria-sivu jäävät tyhjiksi. Suodatus toimii silti.</p>
           <div class="grid2">
-            <label>Lisäksi sallitut verkot (esim. VPN), yksi per rivi<textarea id="s-networks" rows="2" placeholder="203.0.113.0/24"></textarea></label>
+            <label>Säilytä selaushistoriaa (päivää)<input id="s-retention" type="number" step="1" required></label>
           </div>
         </fieldset>
         <fieldset>
-          <legend>Paikalliset nimet</legend>
-          <p class="hint">Lähiverkon laitteiden nimet (esim. <code>nas.lan</code> tai pelkkä <code>nas</code>) ja lähiverkon osoitteiden käänteishaut kysytään reitittimeltä eikä internetistä. Jätä osoite tyhjäksi, jos et käytä laitteiden nimiä.</p>
-          <div class="grid2">
-            <label>Reitittimen osoite<input id="s-local-dns" placeholder="esim. 192.168.1.1"></label>
-            <label>Paikalliset verkkotunnukset<input id="s-local-domains" placeholder="lan, home"></label>
-          </div>
+          <legend>Suodatuksen kiertäminen</legend>
+          <label class="check"><input id="s-bypass" type="checkbox"> Estä suodatuksen kiertäminen</label>
+          <p class="hint">Firefox ja Applen laitteet (iCloud Private Relay) voivat muuten ohittaa Sihdin kokonaan. Apple-laitteet ilmoittavat, että verkko on kytkenyt Private Relayn pois. Esto on voimassa myös silloin, kun suodatus on tauolla tai pois päältä, jotta laitteet eivät siirry ohittamaan Sihtiä tauon aikana. Yksittäisen kiertotien voi sallia lisäämällä sen sallittuihin.</p>
         </fieldset>
+
+        <details class="adv" id="adv-settings">
+          <summary>Lisäasetukset</summary>
+          <p class="hint">Näihin ei yleensä tarvitse koskea.</p>
+          <fieldset>
+            <legend>Nimipalvelimet, joita Sihti käyttää (ylävirran DNS)</legend>
+            <p class="hint">Sihti kysyy sallittujen sivustojen osoitteet näiltä palvelimilta. Yksi per rivi. Portti voi olla mukana, esim. <code>192.168.1.1:5353</code>.</p>
+            <textarea id="s-upstreams" rows="3"></textarea>
+          </fieldset>
+          <fieldset>
+            <legend>Mitä estetylle sivustolle vastataan</legend>
+            <label class="radio"><input type="radio" name="block_mode" value="null"> Osoite 0.0.0.0 / :: <span class="hint">nopein, sovellukset luovuttavat heti</span></label>
+            <label class="radio"><input type="radio" name="block_mode" value="nxdomain"> Osoitetta ei ole olemassa (NXDOMAIN)</label>
+          </fieldset>
+          <fieldset class="grid2">
+            <label>Välimuistin koko (osoitetta)<input id="s-cache" type="number" step="1" required></label>
+            <label>Estolistojen päivitysväli (tuntia)<input id="s-interval" type="number" step="1" required></label>
+          </fieldset>
+          <fieldset>
+            <legend>Päällekkäiset estolistat</legend>
+            <label class="check"><input id="s-skip" type="checkbox"> Ohita listat, joiden kaikki osoitteet ovat jo muilla listoilla</label>
+            <p class="hint">Nopeuttaa listojen päivitystä. Ohitetut listat tarkistetaan viikoittain ja otetaan automaattisesti takaisin käyttöön, jos niihin tulee osoitteita, joita muilla listoilla ei ole. Yksittäisen listan voi pitää aina käytössä Estolistat-sivulta.</p>
+          </fieldset>
+          <fieldset>
+            <legend>Suojaus</legend>
+            <label class="check"><input id="s-cname" type="checkbox"> Tunnista piilotetut seurantapalvelimet</label>
+            <p class="hint">Estää myös osoitteet, jotka osoittavat (CNAME) estettyyn osoitteeseen, esim. sivuston oman alaosoitteen taakse piilotetun seurannan.</p>
+            <label class="check"><input id="s-local-only" type="checkbox"> Vastaa vain kotiverkon laitteille</label>
+            <p class="hint">Sihti ei toimi avoimena DNS-palvelimena, vaikka portti 53 aukeaisi vahingossa internetiin. Lähiverkon IPv4- ja IPv6-osoitteet sallitaan automaattisesti.</p>
+            <div class="grid2">
+              <label>Lisäksi sallitut verkot (esim. VPN), yksi per rivi<textarea id="s-networks" rows="2" placeholder="203.0.113.0/24"></textarea></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Kotiverkon laitteiden nimet</legend>
+            <p class="hint">Lähiverkon laitteiden nimet (esim. <code>nas.lan</code> tai pelkkä <code>nas</code>) ja lähiverkon osoitteiden käänteishaut kysytään reitittimeltä eikä internetistä. Jätä osoite tyhjäksi, jos et käytä laitteiden nimiä.</p>
+            <div class="grid2">
+              <label>Reitittimen osoite<input id="s-local-dns" placeholder="esim. 192.168.1.1"></label>
+              <label>Paikalliset verkkotunnukset<input id="s-local-domains" placeholder="lan, home"></label>
+            </div>
+          </fieldset>
+        </details>
         <button class="btn primary">Tallenna asetukset</button>
         <span id="settings-msg" class="msg" aria-live="polite"></span>
       </form>
 
+      <section class="settings" aria-labelledby="theme-h">
+        <h2 id="theme-h">Ulkoasu</h2>
+        <div class="grid2">
+          <label>Teema
+            <select id="theme">
+              <option value="auto">Laitteen asetuksen mukaan</option>
+              <option value="light">Vaalea</option>
+              <option value="dark">Tumma</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint">Valinta koskee vain tätä selainta.</p>
+      </section>
+
+      <div class="settings danger">
+        <h2>Varmuuskopio ja huolto</h2>
+        <p class="hint">Varmuuskopiossa ovat asetukset, estolistat sekä sallitut ja estetyt sivustot.</p>
+        <button id="backup-save" class="btn">Lataa varmuuskopio</button>
+        <label class="btn" for="backup-file">Palauta varmuuskopio</label>
+        <input id="backup-file" type="file" accept=".json,application/json" hidden>
+        <button id="clear-cache" class="btn" title="Sihti unohtaa muistamansa osoitteet ja hakee ne uudelleen.">Tyhjennä välimuisti</button>
+        <button id="clear-log" class="btn warn">Poista selaushistoria</button>
+        <button id="logout" class="btn" hidden>Kirjaudu ulos</button>
+        <span id="maint-msg" class="msg" aria-live="polite"></span>
+      </div>
+
       <section id="tls" class="settings" aria-labelledby="tls-h">
         <h2 id="tls-h">Suojattu yhteys (HTTPS)</h2>
         <p id="tls-state" class="hint"></p>
-        <dl class="kv" id="tls-info"></dl>
         <div id="tls-ca" hidden>
-          <p>Jotta selain ei varoittaisi yhteydestä, asenna Sihdin varmentaja kerran jokaiselle laitteelle, jolla käytät tätä sivua. Sen jälkeen varmenteen automaattiset uusimiset eivät näy mitenkään. Tarkista asennuksessa, että varmentajan sormenjälki on sama kuin yllä.</p>
+          <p>Jos selain varoittaa yhteydestä, asenna Sihdin varmentaja kerran jokaiselle laitteelle, jolla käytät tätä sivua. Sen jälkeen varoitusta ei enää tule.</p>
           <p><a class="btn primary" href="/sihti-varmentaja.crt" download>Lataa varmentaja</a></p>
-          <details><summary>Windows</summary><p>Avaa ladattu tiedosto → <i>Asenna varmenne</i> → <i>Paikallinen kone</i> → <i>Sijoita kaikki varmenteet seuraavaan säilöön</i> → <i>Luotetut päävarmenteiden myöntäjät</i>. Käynnistä selain uudelleen.</p></details>
-          <details><summary>macOS</summary><p>Avaa tiedosto, jolloin se lisätään Avainnippuun. Etsi Avainnipussa <i>Sihti paikallinen varmentaja</i>, avaa se ja valitse kohdassa <i>Luottamus</i> → <i>Luota aina</i>.</p></details>
-          <details><summary>iPhone ja iPad</summary><p>Avaa tämä sivu Safarilla ja lataa tiedosto → <i>Asetukset</i> → <i>Profiili ladattu</i> → <i>Asenna</i>. Ota sitten käyttöön kohdassa <i>Asetukset → Yleiset → Tietoja → Varmenteiden luottamusasetukset</i>.</p></details>
-          <details><summary>Android</summary><p>Lataa tiedosto → <i>Asetukset → Tietoturva → Lisää tietoturva-asetuksia → Salaus ja kirjautumistiedot → Asenna varmenne → CA-varmenne</i>. Valikon nimet vaihtelevat valmistajittain.</p></details>
-          <details><summary>Linux ja Firefox</summary><p>Linux: <code>sudo cp sihti-varmentaja.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</code>. Firefox käyttää omaa säilöään: <i>Asetukset → Tietosuoja ja turvallisuus → Näytä varmenteet → Myöntäjät → Tuo</i> ja valitse <i>Luota tähän varmentajaan sivustojen tunnistamisessa</i>.</p></details>
+          <p class="hint" id="tls-this" hidden>Tämän laitteen ohje on avattu valmiiksi.</p>
+          <div id="tls-guides">
+            <details data-os="windows"><summary>Windows</summary><p>Avaa ladattu tiedosto → <i>Asenna varmenne</i> → <i>Paikallinen kone</i> → <i>Sijoita kaikki varmenteet seuraavaan säilöön</i> → <i>Luotetut päävarmenteiden myöntäjät</i>. Käynnistä selain uudelleen.</p></details>
+            <details data-os="macos"><summary>macOS</summary><p>Avaa tiedosto, jolloin se lisätään Avainnippuun. Etsi Avainnipussa <i>Sihti paikallinen varmentaja</i>, avaa se ja valitse kohdassa <i>Luottamus</i> → <i>Luota aina</i>.</p></details>
+            <details data-os="ios"><summary>iPhone ja iPad</summary><p>Avaa tämä sivu Safarilla ja lataa tiedosto → <i>Asetukset</i> → <i>Profiili ladattu</i> → <i>Asenna</i>. Ota sitten käyttöön kohdassa <i>Asetukset → Yleiset → Tietoja → Varmenteiden luottamusasetukset</i>.</p></details>
+            <details data-os="android"><summary>Android</summary><p>Lataa tiedosto → <i>Asetukset → Tietoturva → Lisää tietoturva-asetuksia → Salaus ja kirjautumistiedot → Asenna varmenne → CA-varmenne</i>. Valikon nimet vaihtelevat valmistajittain.</p></details>
+            <details data-os="linux"><summary>Linux</summary><p><code>sudo cp sihti-varmentaja.crt /usr/local/share/ca-certificates/ &amp;&amp; sudo update-ca-certificates</code></p></details>
+            <details data-os="firefox"><summary>Firefox</summary><p>Firefox käyttää omaa säilöään: <i>Asetukset → Tietosuoja ja turvallisuus → Näytä varmenteet → Myöntäjät → Tuo</i> ja valitse <i>Luota tähän varmentajaan sivustojen tunnistamisessa</i>.</p></details>
+          </div>
         </div>
+        <details class="adv" id="tls-tech" hidden>
+          <summary>Tekniset tiedot</summary>
+          <dl class="kv" id="tls-info"></dl>
+          <p class="hint" id="tls-fp-hint" hidden>Voit varmistaa asennuksessa, että varmentajan sormenjälki on sama kuin tässä.</p>
+        </details>
         <p><button id="tls-renew" class="btn" type="button" hidden>Uusi varmenne nyt</button> <span id="tls-msg" class="msg" aria-live="polite"></span></p>
       </section>
 
@@ -244,21 +305,17 @@ try { var t = localStorage.getItem("sihti-teema"); if (t === "light" || t === "d
           <dt>Ilman Dockeria</dt><dd><code>sudo journalctl -u sihti | grep "random password" | tail -n1</code></dd>
         </dl>
       </section>
-
-      <div class="settings danger">
-        <h2>Huolto</h2>
-        <button id="backup-save" class="btn">Lataa varmuuskopio</button>
-        <label class="btn" for="backup-file">Palauta varmuuskopio</label>
-        <input id="backup-file" type="file" accept=".json,application/json" hidden>
-        <button id="clear-cache" class="btn">Tyhjennä välimuisti</button>
-        <button id="clear-log" class="btn warn">Poista kyselyloki</button>
-        <button id="logout" class="btn" hidden>Kirjaudu ulos</button>
-        <span id="maint-msg" class="msg" aria-live="polite"></span>
-      </div>
     </section>
   </main>
   <footer class="foot"><span data-version>Sihti</span> – Zarm Instruments</footer>
 </div>
+
+<!-- Vahvistuskysymys ja ilmoitus sivun sisällä (selaimen omien confirm/alert-ikkunoiden tilalla) -->
+<dialog id="ask" class="ask">
+  <p id="ask-text"></p>
+  <div id="ask-btns" class="ask-btns"></div>
+</dialog>
+<div id="toast" class="toast" role="status" hidden></div>
 
 <script src="/app.js"></script>
 </body>
