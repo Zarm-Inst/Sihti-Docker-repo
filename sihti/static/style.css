@@ -116,10 +116,24 @@ main { max-width: 1180px; margin: 0 auto; padding: 2rem clamp(16px, 4vw, 40px) 3
   color: var(--muted); font-size: .8rem; border-top: 1px solid var(--line); }
 
 /* Yleiskuva */
-.lead { font-size: clamp(1.35rem, 2.6vw, 2rem); font-weight: 650; line-height: 1.25;
-  max-width: 34ch; margin: 0 0 1.75rem; letter-spacing: -.015em; }
-.lead b { font-variant-numeric: tabular-nums; }
-.lead .caught { color: var(--lingon); }
+/* Tilakortti: onko suodatus päällä, yhdellä silmäyksellä */
+.status-card { background: var(--paper); border: 1px solid var(--line); border-left: 8px solid var(--lichen);
+  border-radius: var(--radius-m); padding: 1.1rem 1.4rem 1.2rem; margin: 0 0 1.5rem; }
+.status-card.on { border-left-color: var(--moss); }
+.status-card.off { border-color: var(--lingon); background: color-mix(in srgb, var(--lingon) 10%, var(--paper)); }
+.status-title { font-size: clamp(1.35rem, 2.6vw, 1.9rem); font-weight: 650; line-height: 1.25;
+  margin: 0 0 .35rem; letter-spacing: -.015em; }
+.status-card.on .status-title::before { content: "✓ "; color: var(--moss); }
+.status-card.off .status-title::before { content: "! "; color: var(--lingon); }
+.status-sub { margin: 0; max-width: 60ch; }
+.status-sub b { font-variant-numeric: tabular-nums; }
+.status-sub .caught { color: var(--lingon); }
+.status-card .btn { margin-top: .9rem; }
+
+/* Varoituspalkki, kun suodatus on pois tai tauolla */
+.offbar { display: flex; align-items: center; justify-content: center; gap: .5rem 1rem; flex-wrap: wrap;
+  padding: .6rem clamp(16px, 4vw, 40px); background: var(--lingon); color: var(--paper); font-weight: 600; }
+.offbar .btn { border-color: var(--paper); }
 
 /* Tilastoruudut: luvut tekstin värillä, tunniste värimerkillä */
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; }
@@ -157,7 +171,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 2rem clamp(16px, 4vw, 40px) 3
   font-variant-numeric: tabular-nums; margin-top: .25rem; }
 
 .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem 2rem;
-  margin: 2rem 0 2.5rem; padding: 1.25rem 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  margin: 1rem 0 .5rem; }
+.tops { margin-top: 2.5rem; }
+.tops + .adv { margin-top: 2.5rem; }
 .facts div { display: flex; flex-direction: column-reverse; }
 .facts dt { color: var(--muted); font-size: .85rem; }
 .facts dd { margin: 0; font-size: 1.3rem; font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -192,12 +208,21 @@ table.log { width: 100%; border-collapse: collapse; font-size: .875rem; }
 .tag { font-size: .8rem; padding: .1rem .45rem; border-radius: 999px; background: var(--line); }
 .tag.estetty { background: color-mix(in srgb, var(--lingon) 15%, transparent); color: var(--lingon); }
 .tag.sallittu { background: color-mix(in srgb, var(--moss) 15%, transparent); color: var(--moss); }
-.linkbtn { font: inherit; font-size: .8rem; background: none; border: 0; color: var(--moss); cursor: pointer; padding: 0; text-decoration: underline; }
+/* Tekstipainike: riittävän iso myös sormella osuttavaksi */
+.linkbtn { font: inherit; font-size: .9rem; font-weight: 550; background: none; border: 0; color: var(--moss); cursor: pointer;
+  padding: .35rem .6rem; min-height: 2.25rem; border-radius: var(--radius-s); text-decoration: underline; }
+.linkbtn:hover { background: color-mix(in srgb, var(--moss) 12%, transparent); }
+@media (pointer: coarse) {
+  .linkbtn { min-height: 2.75rem; min-width: 2.75rem; }
+  .btn, select { min-height: 2.75rem; }
+}
 
-/* Säännöt */
-.checker { margin-bottom: 2rem; max-width: 560px; }
-.checker label { font-weight: 600; display: block; margin-bottom: .4rem; }
-#check-result { min-height: 1.5em; font-weight: 550; }
+/* Sivun tarkistus (yleiskuva) */
+.checker { margin: 0 0 1.75rem; max-width: 640px; }
+.checker label { font-weight: 650; display: block; }
+.checker .hint { margin-bottom: .5rem; }
+#check-result { min-height: 1.5em; font-weight: 550; margin: .6rem 0 0; }
+#check-result .btn { margin: .25rem 0; }
 #check-result.no { color: var(--lingon); }
 #check-result.ok { color: var(--moss); }
 .rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 2rem; }
@@ -236,7 +261,6 @@ label.btn { display: inline-block; }
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 560px) {
-  .blocking #state-text { display: none; }
   .kpi { padding: .75rem .8rem .85rem; }
   .kpi::after { display: none; }
   .kpi-label { padding-right: 0; }
@@ -271,4 +295,23 @@ input[type=checkbox], input[type=radio] { accent-color: var(--moss); }
 .mark-name { fill: var(--spruce); font-family: inherit; }
 .mark-maker { fill: var(--muted); font-family: inherit; }
 .brand svg { flex-shrink: 0; }
-.theme { font-size: .9rem; padding: .4rem .5rem; }
+
+/* Lisäasetukset ja tekniset tiedot: oletuksena suljettu osio */
+details.adv > summary { color: var(--muted); }
+details.adv[open] > summary { color: var(--spruce); margin-bottom: .75rem; }
+details.adv fieldset:last-child { margin-bottom: .5rem; }
+details.adv .rule-col { max-width: 560px; }
+.rules + .rules-hint { margin-top: 1.5rem; }
+
+/* Vahvistuskysymys ja ilmoitus */
+.ask { border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--paper); color: var(--spruce);
+  padding: 1.5rem; width: min(440px, calc(100vw - 32px)); box-shadow: 0 8px 40px rgb(0 0 0 / .3); }
+.ask::backdrop { background: rgb(0 0 0 / .45); }
+.ask p { margin: 0 0 1.25rem; }
+.ask-btns { display: flex; gap: .5rem; flex-wrap: wrap; justify-content: flex-end; }
+.toast { position: fixed; left: 50%; bottom: 1.25rem; transform: translateX(-50%); z-index: 10;
+  display: flex; align-items: center; gap: .75rem 1rem; flex-wrap: wrap;
+  width: max-content; max-width: calc(100vw - 32px); padding: .75rem 1rem;
+  background: var(--spruce); color: var(--birch); border-radius: var(--radius-m);
+  box-shadow: 0 6px 24px rgb(0 0 0 / .3); font-size: .95rem; }
+.toast .btn { flex-shrink: 0; }
