@@ -11,6 +11,9 @@ import time
 from . import dnswire as w
 
 log = logging.getLogger("sihti.dns")
+# s; kuinka usein palvelinsilmukka tarkistaa pysäytyspyynnön, kun pyyntöjä ei tule. Pythonin oletus
+# 0,5 s herättäisi jokaisen kuuntelijan turhaan kahdesti sekunnissa vuorokauden ympäri.
+SERVE_POLL = 5
 
 
 class Cache:
@@ -392,7 +395,7 @@ def _bind(resolver, host, port, v6only=False):
             srv.server_close()
         raise
     for srv in servers:
-        threading.Thread(target=srv.serve_forever, daemon=True, name=f"dns-{host}").start()
+        threading.Thread(target=srv.serve_forever, args=(SERVE_POLL,), daemon=True, name=f"dns-{host}").start()
     return servers
 
 

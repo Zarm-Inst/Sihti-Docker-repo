@@ -66,7 +66,8 @@ def main():
     qlog = QueryLog(config)
     resolver = Resolver(config, filt, qlog)
 
-    threading.Thread(target=qlog.writer_loop, args=(stop,), daemon=True, name="loki").start()
+    writer = threading.Thread(target=qlog.writer_loop, args=(stop,), daemon=True, name="loki")
+    writer.start()
     threading.Thread(target=filt.updater_loop, args=(stop,), daemon=True, name="listat").start()
     servers = start_servers(resolver, config["dns_listen"], config["dns_port"], ipv6=config["dns_listen_ipv6"])
     certs, tls_ctx = None, None
@@ -86,8 +87,15 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     stop.wait()
-    for s in servers:
-        s.shutdown()
+    qlog.wake()   # kerätyt lokirivit tallennetaan, kun kuuntelijat sulkeutuvat
+    # Rinnakkain: jokainen kuuntelija huomaa pysäytyksen enintään SERVE_POLL sekunnissa, joten koko
+    # pysäytys mahtuu Dockerin 10 s odotusaikaan.
+    closers = [threading.Thread(target=s.shutdown) for s in servers]
+    for t in closers:
+        t.start()
+    for t in closers:
+        t.join()
+    writer.join(timeout=3)
     logging.getLogger("sihti").info("pysäytetty")
 
 

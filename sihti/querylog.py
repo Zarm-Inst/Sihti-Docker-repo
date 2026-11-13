@@ -10,6 +10,8 @@ log = logging.getLogger("sihti.loki")
 
 RETRY_DELAY = 5            # s; epäonnistunut erä kirjoitetaan uudelleen uudella yhteydellä (LOG-009)
 ERROR_LOG_INTERVAL = 60    # s; toistuva sama virhe sovelluslokiin enintään näin usein
+FLUSH_INTERVAL = 10        # s; rivit kerätään ja tallennetaan yhdellä kertaa (vähemmän muistikorttikirjoituksia)
+IDLE_WAIT = 60             # s; tyhjän jonon odotus, jonka jälkeen tarkistetaan vanhojen rivien poisto
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kyselyt (
@@ -35,6 +37,7 @@ class QueryLog:
         self._summary_lock = threading.Lock()
         self._summary_cache = {}  # hours -> (aika, tulos)
         self.summary_ttl = 5      # s; usea avoin välilehti tai laite ei aja raskasta kyselyä joka kerta
+        self.flush_interval = FLUSH_INTERVAL
         db = self._connect()
         db.executescript(SCHEMA)
         if "detail" not in {r[1] for r in db.execute("PRAGMA table_info(kyselyt)")}:
@@ -68,15 +71,29 @@ class QueryLog:
             with self._dropped_lock:
                 self.dropped += 1
 
-    def _take_batch(self):
-        batch = []
+    def wake(self):
+        """Herättää tyhjää jonoa odottavan kirjoitussäikeen pysäytystä varten."""
         try:
-            batch.append(self._q.get(timeout=1))
-            while len(batch) < 1000:
+            self._q.put_nowait(None)
+        except queue.Full:
+            pass   # jono ei ole tyhjä, joten säie ei odota
+
+    def _take_batch(self, stop_event):
+        """Odottaa ensimmäistä riviä, kerää rivejä flush_interval sekuntia ja palauttaa kaikki
+        jonossa olevat. Pysäytys keskeyttää keräämisen, jolloin kerätyt rivit tallennetaan heti."""
+        try:
+            first = self._q.get(timeout=IDLE_WAIT)
+        except queue.Empty:
+            return []
+        if self.flush_interval > 0:
+            stop_event.wait(self.flush_interval)
+        batch = [first]
+        try:
+            while True:
                 batch.append(self._q.get_nowait())
         except queue.Empty:
             pass
-        return batch
+        return [r for r in batch if r is not None]
 
     def _write_failed(self, e):
         """Ensimmäinen virhe sovelluslokiin heti, toistuva enintään kerran minuutissa."""
@@ -96,15 +113,15 @@ class QueryLog:
         self._failures = 0
 
     def writer_loop(self, stop_event):
-        """Kirjoittaa jonon erissä ja poistaa vanhat rivit (LOG-004, LOG-007). Virhe ei saa
-        pysäyttää säiettä (LOG-009): epäonnistunut erä säilytetään ja kirjoitetaan uudelleen
-        uudella yhteydellä. Sillä välin rivit jäävät jonoon, ja täyden jonon rivit pudotetaan."""
+        """Kirjoittaa jonon erissä enintään FLUSH_INTERVAL sekunnin välein ja poistaa vanhat rivit
+        (LOG-004, LOG-007). Virhe ei saa pysäyttää säiettä (LOG-009): epäonnistunut erä säilytetään
+        ja kirjoitetaan uudelleen uudella yhteydellä. Sillä välin rivit jäävät jonoon, ja täyden jonon rivit pudotetaan."""
         db = None
         batch = []
         last_purge = 0
         while not stop_event.is_set():
             if not batch:
-                batch = self._take_batch()
+                batch = self._take_batch(stop_event)
             try:
                 if db is None:
                     db = self._connect()

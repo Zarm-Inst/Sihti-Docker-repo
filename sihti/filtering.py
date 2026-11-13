@@ -819,15 +819,27 @@ class Filter:
         self.update_async()
 
     def _remove_stale_files(self):
-        """Poistaa poistettujen listojen tiedostot ja niiden välimuistit."""
-        keep = {os.path.splitext(os.path.basename(self._list_file(e["url"])))[0] for e in self.config["lists"]}
+        """Poistaa poistettujen listojen tiedostot, niiden välimuistit ja keskeytyneiden latausten
+        väliaikaistiedostot sekä listojen tiedot (etag, tiiviste), jotta mikään ei kasva vuosien
+        mittaan, kun listoja lisätään ja poistetaan."""
+        urls = {e["url"] for e in self.config["lists"]}
+        keep = {os.path.splitext(os.path.basename(self._list_file(u)))[0] for u in urls}
         for fn in os.listdir(self.lists_dir):
-            base, ext = os.path.splitext(fn)
+            name = fn[:-4] if fn.endswith(".tmp") else fn   # <tunniste>.txt.tmp: keskeytynyt lataus
+            base, ext = os.path.splitext(name)
             if ext in (".txt", ".fp") and re.fullmatch(r"[0-9a-f]{16}", base) and base not in keep:
                 try:
                     os.remove(os.path.join(self.lists_dir, fn))
                 except OSError:
                     pass
+        with self._meta_lock:
+            stale = [u for u in self._meta if u not in urls]
+            for u in stale:
+                del self._meta[u]
+            for u in [u for u in list(self.list_status) if u not in urls]:
+                del self.list_status[u]
+            if stale:
+                self._save_meta()
 
     def _load_last_update(self):
         try:
